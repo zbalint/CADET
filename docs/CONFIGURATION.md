@@ -41,14 +41,23 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 | `CADET_CURSOR_EFFORT` | none (no effort applied) | Applied as a bracket override on the model string (`<model>[effort=<value>]`) only when a model is also set. **UNCONFIRMED** against a real call — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior). |
 | `CADET_CURSOR_SANDBOX` | `true` | Whether `sandbox=True` maps to `--mode plan` (genuinely read-only, confirmed) vs. omitting `--mode` entirely. **The `sandbox=False` + `skip_permissions=False` combo does not reliably apply edits on this platform** (no TTY to approve the tool call, despite an exit-0 success claim) — pass `skip_permissions=True` (maps to `--force`, paired with the always-on `--trust`) for real edits instead. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior). |
 
+### `copilot` provider env vars
+
+| Var | Default | Purpose |
+|---|---|---|
+| `CADET_COPILOT_PATH` | none — provider unavailable if unset | Absolute path to `copilot.cmd` (e.g. `C:\Users\<user>\AppData\Roaming\npm\copilot.cmd`) — used only to locate its directory. On Windows, `providers/copilot.py` invokes `node.exe` + that directory's `node_modules\@github\copilot\npm-loader.js` **directly**, bypassing both `copilot.cmd` and `copilot.ps1` — each has its own unrelated bug that corrupts CADET's rendered prompt (see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior)). Not required at server startup — if unset, `copilot` just isn't in `delegate_task`'s available providers and requesting it returns a clean `{"error": ...}`. |
+| `CADET_COPILOT_NODE_PATH` | none | Absolute path to `node.exe`, used only if there's no `node.exe` sitting next to `CADET_COPILOT_PATH` (there usually isn't — Node is typically installed separately, e.g. `C:\Program Files\nodejs\node.exe`). Required in that common case; `copilot` jobs fail fast with a clear error if neither is found. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
+| `CADET_COPILOT_MODEL` | `auto` | Passed through as `copilot --model` unless overridden per-call by `delegate_task`'s `model` param. **Always passed explicitly**, defensively mirroring `cursor` (not confirmed to have the same sticky-global-default bug, but costs nothing to avoid relying on unconfirmed default behavior). |
+| `CADET_COPILOT_EFFORT` | none (no effort applied) | Passed through as `copilot --effort <value>` unless overridden per-call. One of `none`\|`minimal`\|`low`\|`medium`\|`high`\|`xhigh`\|`max`. **Confirmed to hard-error when combined with `model="auto"`** (`Error: Model "auto" does not support reasoning effort configuration...`) — pair with a real `CADET_COPILOT_MODEL`/`model` if setting this. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
+| `CADET_COPILOT_SANDBOX` | `true` | Whether `sandbox=True` (with `skip_permissions=False`) maps to `--mode plan` (genuinely read-only, confirmed) vs. omitting `--mode` entirely. **Unlike `codex`/`cursor`, `sandbox=False` with `skip_permissions=False` is not a known-broken combo here** — it behaves identically to `skip_permissions=True` (real edits) because `--allow-all-tools` is always passed (required for non-interactive mode to function at all) and `--mode plan`'s presence/absence is the only actual write gate. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
+
 ### Other providers (planned)
 
-`agy`, `codex`, and `cursor` are the providers with real env vars wired up today. Once a `copilot`
-provider module lands (see [ARCHITECTURE.md](./ARCHITECTURE.md#provider-abstraction)), it gets its
-own `CADET_COPILOT_PATH`/`_MODEL`/`_EFFORT`/`_SANDBOX` vars following the exact same pattern as
-above. A provider with no `_PATH` set simply isn't offered — `delegate_task(provider=...)` for it
-returns a clean `{"error": ...}` rather than the server failing to start (unlike `CADET_AGY_PATH`,
-which stays required/fail-fast at startup for backward compatibility).
+`agy`, `codex`, `cursor`, and `copilot` are all the providers CADET currently supports, each with
+real env vars wired up following the exact same pattern above. A provider with no `_PATH` set
+simply isn't offered — `delegate_task(provider=...)` for it returns a clean `{"error": ...}` rather
+than the server failing to start (unlike `CADET_AGY_PATH`, which stays required/fail-fast at
+startup for backward compatibility).
 
 ## Setup step: `cadet-install-agy-permissions`
 

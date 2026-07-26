@@ -6,6 +6,7 @@ from cadet.db import job_store
 from cadet.process.providers.agy import spawn as spawn_agy, parse_error as parse_error_agy
 from cadet.process.providers.codex import spawn as spawn_codex, parse_error as parse_error_codex
 from cadet.process.providers.cursor import spawn as spawn_cursor, parse_error as parse_error_cursor
+from cadet.process.providers.copilot import spawn as spawn_copilot, parse_error as parse_error_copilot
 from cadet.process.treekill import kill_process_tree
 
 # NOTE: dispatch dicts referencing spawn_agy/parse_error_agy are built fresh
@@ -70,7 +71,7 @@ class Dispatcher:
             stderr_fh = open(job["stderr_log_path"], "ab")
 
             provider_name = job["provider"] or "agy"
-            spawn_fns = {"agy": spawn_agy, "codex": spawn_codex, "cursor": spawn_cursor}
+            spawn_fns = {"agy": spawn_agy, "codex": spawn_codex, "cursor": spawn_cursor, "copilot": spawn_copilot}
             spawn_fn = spawn_fns[provider_name]
 
             proc = await spawn_fn(
@@ -112,7 +113,10 @@ class Dispatcher:
             else:
                 status = "failed"
                 stderr_fh.flush()
-                parse_error_fns = {"agy": parse_error_agy, "codex": parse_error_codex, "cursor": parse_error_cursor}
+                parse_error_fns = {
+                    "agy": parse_error_agy, "codex": parse_error_codex,
+                    "cursor": parse_error_cursor, "copilot": parse_error_copilot,
+                }
                 error_kind, quota_reset_at = parse_error_fns[provider_name](
                     _read_tail(job["stderr_log_path"]), finished_at
                 )

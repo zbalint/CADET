@@ -29,7 +29,7 @@ of paying Claude-level cost for grunt work.
   process orchestration: render a prompt, spawn the chosen provider's CLI as a background
   subprocess, track its lifecycle, and expose status/output back to Claude via MCP tools. **CADET
   never calls SALTMDB.**
-- **The provider CLI** (`agy`/Antigravity today; Codex, Cursor, Copilot planned) — the executor.
+- **The provider CLI** (`agy`/Antigravity, Codex, Cursor, or Copilot) — the executor.
   Invoked headless via its own non-interactive flag (`agy -p "<prompt>"`). Has its own SALTMDB MCP
   tools and its own global instructions, near-identical to Claude's, telling it to search/store
   memory and log events under a shared `context_id`.
@@ -48,17 +48,21 @@ Each provider is a plain Python module under `src/cadet/process/providers/` expo
 `provider` param (default `"agy"`) selects which module handles a job; `src/cadet/process/
 providers/registry.py` is the single source of truth for which provider names are known.
 
-**`agy`, `codex`, and `cursor` are wired up today.** GitHub Copilot CLI is planned as a separate
-follow-up phase, gated on an empirical validation pass against the real installed binary — vendor
-docs leave real ambiguity about whether a CLI's default invocation actually applies edits or
-silently no-ops. It's an accepted outcome if a given provider ends up only safely usable for
-read-only/analysis tasks initially — this is exactly what happened with `codex`'s default (see
-"Validated `codex` CLI behavior" below): its safe default is read-only, and real edits require
-`skip_permissions=True` on this platform until an upstream Windows bug is fixed. `cursor`'s
-situation is subtler still (see "Validated `cursor` CLI behavior" below): its safe read-only lever
-(`--mode plan`) genuinely works, but the "just apply edits, still gate risky commands" middle
-ground doesn't — confirmed via a live invocation that silently declined a file write while its own
-final message dishonestly claimed success.
+**`agy`, `codex`, `cursor`, and `copilot` are all wired up today** — each gated on its own empirical
+validation pass against the real installed binary before being added, since vendor docs leave real
+ambiguity about whether a CLI's default invocation actually applies edits or silently no-ops. It's
+an accepted outcome if a given provider ends up only safely usable for read-only/analysis tasks
+initially — this is exactly what happened with `codex`'s default (see "Validated `codex` CLI
+behavior" below): its safe default is read-only, and real edits require `skip_permissions=True` on
+this platform until an upstream Windows bug is fixed. `cursor`'s situation is subtler still (see
+"Validated `cursor` CLI behavior" below): its safe read-only lever (`--mode plan`) genuinely works,
+but the "just apply edits, still gate risky commands" middle ground doesn't — confirmed via a live
+invocation that silently declined a file write while its own final message dishonestly claimed
+success. `copilot` (see "Validated `copilot` CLI behavior" below) shares `cursor`'s `.cmd`/`cmd.exe`
+prompt-corruption bug — plus has a second, unrelated bug in its `.ps1` sibling, so CADET bypasses
+both and invokes `node.exe`/`npm-loader.js` directly — and shares `cursor`'s `--mode plan`
+read-only lever, but diverges on the middle ground: `sandbox=False, skip_permissions=False` is not
+broken for `copilot` — it just behaves the same as `skip_permissions=True`.
 
 ## The `context_id` thread
 
@@ -347,6 +351,91 @@ Confirmed empirically against the installed CLI (`cursor-agent`, Windows, free-t
   during validation. `providers/cursor.py`'s `parse_error` is best-effort only, same unconfirmed
   posture as `codex`'s.
 
+## Validated `copilot` CLI behavior
+
+Confirmed empirically against the installed CLI (`@github/copilot` npm package v1.0.75, Windows),
+on 2026-07-26 — real invocations against a scratch directory, not vendor docs alone:
+
+- **Critical — on Windows, neither `copilot.cmd` NOR its `copilot.ps1` sibling is exec'd — both
+  have their own, unrelated bug, and the real fix is to invoke `node.exe` + the vendor's own
+  `npm-loader.js` directly.**
+  - `copilot.cmd` is a `cmd.exe` batch wrapper (`... %*`), same bug class already found for
+    `cursor.cmd`: exec'ing it directly routes through `cmd.exe`, which re-parses `<`/`>`/`&`/`|`/`^`
+    before `%*` is substituted. Reproduced: a prompt containing CADET's own rendered-prompt
+    placeholder (`<one-line summary + outcome>`) made the `.cmd` fail with `The system cannot find
+    the file specified.` (`cmd.exe` treating it as an input redirection).
+  - **`copilot.ps1` looked like the fix (mirroring `cursor`'s), but has its own, different bug.**
+    `copilot.ps1` internally does `& "$basedir/node.exe" ".../npm-loader.js" $args` — a second,
+    internal native-command invocation. When `copilot.ps1` is launched fresh via `powershell.exe
+    -File` (the same non-interactive mechanism CADET/`cursor` use — not from an already-running
+    interactive PowerShell session), PowerShell's own serialization of a `$args` element containing
+    an embedded literal double-quote followed eventually by a space (e.g. `content="<one-line
+    summary + outcome>"`) gets corrupted during that internal re-invocation, and copilot's CLI
+    (commander.js) emits `error: Invalid command format. It looks like your prompt was not
+    quoted...` — a real, reproducible false positive, not a `cmd.exe` redirection issue. Confirmed
+    by a minimal repro: a plain `powershell.exe -File <script> -p "<value>"` correctly preserves an
+    argument containing `<`/`>` end-to-end (proven with a diagnostic script that just echoes
+    `$args`) — so `-File`'s own tokenizing is not at fault; the corruption is specifically inside
+    `copilot.ps1`'s own internal `& node.exe ... $args` hop, which is vendor code CADET can't patch.
+  - **The fix**: invoke `node.exe` and `node_modules/@github/copilot/npm-loader.js` directly,
+    skipping both `.cmd` and `.ps1` (and both their bugs) entirely. `npm-loader.js` is a thin,
+    stable loader (`spawnSync(realBinary, process.argv.slice(2), {stdio:"inherit"})`, no shell
+    involved) that resolves whatever platform binary is currently installed under the same
+    `node_modules/@github/copilot/` tree — like pointing `cursor` at its `.ps1` instead of a
+    hardcoded versioned path, this still survives `npm install -g @github/copilot` version bumps.
+    Confirmed via direct repro calls (`node.exe npm-loader.js -p "<the exact failing prompt>" ...`):
+    both the plan-mode text case and a real file edit (content containing both `<...>` and an
+    embedded `"quoted phrase"`) succeeded with byte-for-byte correct output.
+  - `node.exe`'s location: a sidecar `node.exe` next to `copilot_path` if present, else
+    `CADET_COPILOT_NODE_PATH` (must point at an existing file — no silent bare `"node"` PATH
+    lookup, same reasoning as `CADET_AGY_PATH`). On the actual validation machine, no sidecar
+    existed next to the npm global shims (`node.exe` was only at `C:\Program Files\nodejs\
+    node.exe`), so the explicit env var is what matters in practice, not just a defensive
+    fallback for a hypothetical.
+- **`-C <cwd>` is a real, confirmed flag** — Phase 0's research had flagged cwd-handling as
+  unconfirmed/absent for this provider; it exists and works exactly as expected.
+- **`--allow-all-tools` is required for reliable non-interactive (`-p`) operation and is always
+  passed unconditionally**, mirroring `cursor`'s unconditional `--trust`. Confirmed both ways: with
+  it, `-p`/`-C`/`--mode plan` all completed promptly and correctly; without it (and without
+  `--mode plan` either), a real headless invocation asking for a file write took over 20 seconds
+  and never completed the edit — the vendor's own `--help` text says as much ("required for
+  non-interactive mode"). Same "known non-functional combo" class as `codex`'s broken
+  `workspace-write` and `cursor`'s `--force`-without-`--trust`.
+- **`--mode plan` is the genuine safe/read-only lever**, mirroring `cursor`'s `--mode plan` (not
+  `codex`'s `-s read-only`): a real `--mode plan --allow-all-tools` invocation returned a text
+  response with zero file writes — the plan-mode agent simply has no write tool available,
+  regardless of the tool-approval flag being on.
+- **Unlike `codex`/`cursor`, `sandbox=False` with `skip_permissions=False` is NOT a known-broken
+  combo for this provider — it behaves identically to `skip_permissions=True` (real edits apply).**
+  Because `--allow-all-tools` is unconditional (the only thing that makes non-interactive mode
+  function at all) and `--mode plan`'s presence/absence is the sole write gate,
+  `providers/copilot.py`'s `build_argv` only appends `--mode plan` when `sandbox=True AND
+  skip_permissions=False`; every other combination allows real edits. This was independently
+  confirmed via two separate real file writes (one with angle-bracket content) with no `--mode`
+  flag present. This is a genuine platform difference, not an oversight — `copilot` has no distinct
+  "unsandboxed but still asks permission" state in non-interactive mode.
+- **`--model` is always passed explicitly (default `"auto"`)**, defensively mirroring `cursor`'s
+  stance — not confirmed to have `cursor`'s sticky-global-default bug, but passing explicitly costs
+  nothing and avoids relying on unconfirmed default-resolution behavior.
+- **`--effort`/`--reasoning-effort` is a real, confirmed flag** (choices: `none`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, `max`) — unlike `cursor`'s speculative bracket-on-model-string syntax,
+  `copilot` takes it as its own argv flag. **Confirmed to hard-error when combined with
+  `model="auto"`**: a real call with `--model auto --effort minimal` failed with `Error: Model
+  "auto" does not support reasoning effort configuration (requested: "minimal").` `providers/
+  copilot.py` applies `--effort` whenever set, without validating the paired model — callers
+  requesting effort must also set a real (non-`auto`) model, or the job fails with that vendor
+  error, same as CADET leaving model/effort validity to the provider's own error surface elsewhere.
+- **No specific named model was confirmed available on this account** — every named model tried
+  (`gpt-5.1`, `claude-sonnet-4.5`, `claude-sonnet-4`, `gpt-5`, `gpt-5-mini`, `gpt-4.1`) returned
+  `Error: Model "<name>" from --model flag is not available.`; only `"auto"` was confirmed working.
+  This is an account/plan limitation, not a CADET bug — `CADET_COPILOT_MODEL`/`model` still passes
+  whatever string is given straight through.
+- **No structured quota-exhaustion signal was found** — this account never hit a real rate limit
+  during validation. `providers/copilot.py`'s `parse_error` is best-effort only, same unconfirmed
+  posture as `codex`'s/`cursor`'s. Two real non-quota error strings were captured above (the
+  model/effort mismatch and the model-not-available error) and are covered by `parse_error`'s tests
+  as confirmed non-matches.
+
 ## Quota exhaustion detection
 
 Because the failure text above is a real, current, machine-parseable format (not a guess), CADET
@@ -410,14 +499,14 @@ than CADET building a new notification channel of its own.
    under one `context_id` instead of relying solely on `agy` cold-reading SALTMDB each time. Not
    adopted in v1 because it's unverified whether `-p` (print) mode exposes the new conversation's
    ID anywhere capturable by CADET after a run. Worth revisiting once that's confirmed.
-7. **Quota-exhaustion wording is only empirically confirmed for `agy`.** `codex`'s and `cursor`'s
-   `parse_error` (and any future `copilot` equivalent) are best-effort guesses at vendor wording,
-   never validated against a real exhausted-quota failure — forcing one deliberately to test it
-   wasn't attempted, since it burns real quota. Until each provider has its own confirmed
-   reproduction (the next time one is naturally exhausted during real usage — capture the exact
-   stderr then), a `null` `error_kind` on a failed non-agy job does **not** mean "definitely not a
-   quota issue" — it may just mean the guessed regex didn't match. Check raw `stderr` via
-   `get_task_output` rather than trusting `error_kind` alone for non-agy providers in the meantime.
+7. **Quota-exhaustion wording is only empirically confirmed for `agy`.** `codex`'s, `cursor`'s, and
+   `copilot`'s `parse_error` are all best-effort guesses at vendor wording, never validated against
+   a real exhausted-quota failure — forcing one deliberately to test it wasn't attempted, since it
+   burns real quota. Until each provider has its own confirmed reproduction (the next time one is
+   naturally exhausted during real usage — capture the exact stderr then), a `null` `error_kind` on
+   a failed non-agy job does **not** mean "definitely not a quota issue" — it may just mean the
+   guessed regex didn't match. Check raw `stderr` via `get_task_output` rather than trusting
+   `error_kind` alone for non-agy providers in the meantime.
 8. **`cursor`'s "safe-but-functional" edit mode is unreachable headlessly.** Unlike `codex` (whose
    broken middle ground is a Windows-specific upstream bug that could plausibly be fixed
    upstream), `cursor`'s gap looks structural: real edits require bypassing tool-call approval
