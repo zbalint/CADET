@@ -40,6 +40,10 @@ class TestParseQuotaExhaustion(unittest.TestCase):
         _, quota_reset_at = parse_quota_exhaustion(stderr, "2026-07-26T00:00:00")
         self.assertEqual(quota_reset_at, "2026-07-28T03:00:00")
 
+    def test_out_of_order_duration_returns_none_none(self):
+        stderr = "quota reached, resets in 3h2d"
+        self.assertEqual(parse_quota_exhaustion(stderr, "2026-07-26T00:00:00"), (None, None))
+
 
 if __name__ == "__main__":
     unittest.main()
