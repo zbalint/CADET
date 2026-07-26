@@ -23,7 +23,9 @@ class DispatcherTestCase(unittest.IsolatedAsyncioTestCase):
         self.db_path = os.path.join(self.temp_dir, "test.db")
         conn = init_db(self.db_path)
         conn.close()
-        self.dispatcher = Dispatcher(agy_path="C:\\tools\\agy.exe", max_concurrent=2, db_path=self.db_path)
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "C:\\tools\\agy.exe"}, max_concurrent=2, db_path=self.db_path
+        )
 
     def tearDown(self):
         if self.dispatcher._dispatcher_task is not None:
@@ -152,6 +154,16 @@ class TestRunJobLifecycle(DispatcherTestCase):
         self.assertEqual(job["status"], "failed")
         self.assertIn("CADET internal error", job["error_message"])
 
+    async def test_unconfigured_provider_fails_gracefully(self):
+        self._create_pending_job(provider="codex")
+        await self.dispatcher._semaphore.acquire()
+        await self.dispatcher.run_job("job-1")
+
+        self.assertEqual(self.dispatcher._semaphore._value, 2)
+        job = job_store.get_job("job-1", db_path=self.db_path)
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("CADET internal error", job["error_message"])
+
 
 class TestCancel(DispatcherTestCase):
     async def test_cancel_pending_job(self):
@@ -209,7 +221,9 @@ class TestCancel(DispatcherTestCase):
 
 class TestDispatchLoopConcurrency(DispatcherTestCase):
     async def test_respects_max_concurrent_and_processes_queue_in_order(self):
-        self.dispatcher = Dispatcher(agy_path="C:\\tools\\agy.exe", max_concurrent=1, db_path=self.db_path)
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "C:\\tools\\agy.exe"}, max_concurrent=1, db_path=self.db_path
+        )
         cwd_a = os.path.join(self.temp_dir, "proj-a")
         cwd_b = os.path.join(self.temp_dir, "proj-b")
         os.makedirs(cwd_a, exist_ok=True)

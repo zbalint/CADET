@@ -7,31 +7,53 @@
 
 Claude Code is a strong architect but expensive to run for bulk execution work. Antigravity
 (`agy`), Google's agentic CLI running Gemini Flash models, is cheap and fast but a weaker
-architect. CADET lets Claude plan once and delegate the resulting implementation/execution work
-to Antigravity, instead of paying Claude-level cost for grunt work.
+architect — as are the other free/cheap-tier CLI coding agents CADET is being widened to support
+(Codex CLI, Cursor CLI, GitHub Copilot CLI; see "Provider abstraction" below). CADET lets Claude
+plan once and delegate the resulting implementation/execution work to a chosen provider, instead
+of paying Claude-level cost for grunt work.
 
 ## Actors
 
 ```
- Claude Code  ──MCP──▶  CADET  ──subprocess──▶  agy -p "<rendered prompt>"
+ Claude Code  ──MCP──▶  CADET  ──subprocess──▶  <provider CLI> -p/-exec "<rendered prompt>"
       │                                                  │
       └───────────────────MCP──────┐    ┌────MCP─────────┘
                                     ▼    ▼
                                  SALTMDB (shared memory)
 ```
 
-- **Claude Code** — the architect. Decomposes work, calls CADET's tools to delegate a task, and
-  later polls for status/output. Also has its own SALTMDB tools.
+- **Claude Code** — the architect. Decomposes work, calls CADET's tools to delegate a task
+  (picking a `provider` — default `agy`), and later polls for status/output. Also has its own
+  SALTMDB tools.
 - **CADET** — an MCP server (Python + FastMCP) that Claude Code connects to. Its only job is
-  process orchestration: render a prompt, spawn `agy` as a background subprocess, track its
-  lifecycle, and expose status/output back to Claude via MCP tools. **CADET never calls SALTMDB.**
-- **`agy` (Antigravity)** — the executor. Invoked headless via `agy -p "<prompt>"`. Has its own
-  SALTMDB MCP tools and its own global instructions (`~/.gemini/GEMINI.md`), near-identical to
-  Claude's, telling it to search/store memory and log events under a shared `context_id`.
+  process orchestration: render a prompt, spawn the chosen provider's CLI as a background
+  subprocess, track its lifecycle, and expose status/output back to Claude via MCP tools. **CADET
+  never calls SALTMDB.**
+- **The provider CLI** (`agy`/Antigravity today; Codex, Cursor, Copilot planned) — the executor.
+  Invoked headless via its own non-interactive flag (`agy -p "<prompt>"`). Has its own SALTMDB MCP
+  tools and its own global instructions, near-identical to Claude's, telling it to search/store
+  memory and log events under a shared `context_id`.
 - **SALTMDB** — an existing, separate MCP memory server (`C:\Users\zbalint\Workspace\SALTMDB`,
-  not modified by this project). Both Claude and `agy` connect to it independently. It is how
-  knowledge actually flows between the two agents — CADET only carries the `context_id` that ties
-  a given `agy` run back to the right SALTMDB thread.
+  not modified by this project). Both Claude and the delegated provider connect to it
+  independently. It is how knowledge actually flows between the two agents — CADET only carries
+  the `context_id` that ties a given job back to the right SALTMDB thread.
+
+## Provider abstraction
+
+CADET delegates to a pluggable set of CLI coding agents rather than being hardcoded to `agy`.
+Each provider is a plain Python module under `src/cadet/process/providers/` exposing `NAME`,
+`AGENT_ID`, `DISPLAY_NAME`, `build_argv(...)`, `spawn(...)`, and `parse_error(...)` — see
+`providers/agy.py` for the reference shape (a thin re-export shim over the original
+`launcher.py`/`quota.py`, kept as the source of truth for agy's own behavior). `delegate_task`'s
+`provider` param (default `"agy"`) selects which module handles a job; `src/cadet/process/
+providers/registry.py` is the single source of truth for which provider names are known.
+
+**Only `agy` is actually wired up today.** Codex CLI, Cursor CLI, and GitHub Copilot CLI are
+planned as separate follow-up phases, each gated on an empirical validation pass against the real
+installed binary — vendor docs leave real ambiguity about whether each CLI's default invocation
+actually applies edits or silently no-ops (e.g. Codex defaults to a read-only sandbox; Cursor
+needs `--force` just to apply anything). It's an accepted outcome if a given provider ends up
+only safely usable for read-only/analysis tasks initially.
 
 ## The `context_id` thread
 
@@ -98,8 +120,9 @@ CREATE TABLE jobs (
   label             TEXT,
   prompt_path       TEXT NOT NULL,      -- rendered prompt saved to disk, not inlined in the row
   cwd               TEXT NOT NULL,
-  model             TEXT,               -- requested `agy --model`, if any (see MCP_TOOLS.md)
-  effort            TEXT,               -- requested `agy --effort`, if any
+  provider          TEXT NOT NULL DEFAULT 'agy',  -- which provider ran this job (see "Provider abstraction" above)
+  model             TEXT,               -- requested `--model` (or provider equivalent), if any (see MCP_TOOLS.md)
+  effort            TEXT,               -- requested `--effort` (or provider equivalent), if any
   skip_permissions  INTEGER NOT NULL DEFAULT 0,  -- 0/1, whether --dangerously-skip-permissions was passed
   pid               INTEGER,            -- null until spawned
   status            TEXT NOT NULL,

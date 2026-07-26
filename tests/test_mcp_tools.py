@@ -30,7 +30,7 @@ class McpToolsTestCase(unittest.IsolatedAsyncioTestCase):
         conn = init_db(self.db_path)
         conn.close()
 
-        self.dispatcher = Dispatcher(agy_path=fake_agy, max_concurrent=2, db_path=self.db_path)
+        self.dispatcher = Dispatcher(executable_paths={"agy": fake_agy}, max_concurrent=2, db_path=self.db_path)
         tools.set_dispatcher(self.dispatcher)
 
     def tearDown(self):
@@ -95,6 +95,16 @@ class TestDelegateTask(McpToolsTestCase):
         result = await tools.delegate_task(prompt="x", cwd=self.scratch_cwd, timeout_s=99999)
         job = tools.check_task_status(job_id=result["job_id"])
         self.assertEqual(job["timeout_s"], 100)
+
+    async def test_defaults_to_agy_provider(self):
+        result = await tools.delegate_task(prompt="x", cwd=self.scratch_cwd)
+        job = tools.check_task_status(job_id=result["job_id"])
+        self.assertEqual(job["provider"], "agy")
+
+    async def test_unknown_provider_returns_error_and_creates_no_job(self):
+        result = await tools.delegate_task(prompt="x", cwd=self.scratch_cwd, provider="bogus")
+        self.assertIn("error", result)
+        self.assertEqual(len(tools.list_tasks()), 0)
 
     async def test_dispatch_loop_running_reflects_in_return_status(self):
         release_event = asyncio.Event()

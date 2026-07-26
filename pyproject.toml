@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cadet"
 version = "0.1.0-alpha.1"
-description = "MCP server for delegating execution work from Claude Code to Antigravity CLI"
+description = "MCP server for delegating execution work from Claude Code to pluggable CLI coding agents"
 readme = "README.md"
 authors = [{ name = "Balint Zoltan Marton" }]
 license = { text = "AGPL-3.0-only" }

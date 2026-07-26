@@ -23,6 +23,16 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 | `CADET_WEB_HOST` | `127.0.0.1` | Bind host for the dashboard. Loopback-only by default — there's no authentication, so only change this if you understand the exposure. |
 | `CADET_WEB_PORT` | `8420` | Bind port for the dashboard. |
 
+### Other providers (planned)
+
+`agy` is the only provider with real env vars wired up today. Once a `codex`/`cursor`/`copilot`
+provider module lands (see [ARCHITECTURE.md](./ARCHITECTURE.md#provider-abstraction)), each gets
+its own `CADET_<PROVIDER>_PATH`/`_MODEL`/`_EFFORT`/`_SANDBOX` vars following the exact same
+pattern as the `CADET_AGY_*` vars above (e.g. `CADET_CODEX_PATH`, `CADET_CODEX_MODEL`). A
+provider with no `_PATH` set simply isn't offered — `delegate_task(provider=...)` for it returns
+a clean `{"error": ...}` rather than the server failing to start (unlike `CADET_AGY_PATH`, which
+stays required/fail-fast at startup for backward compatibility).
+
 ## Setup step: `cadet-install-agy-permissions`
 
 A manual, one-time, idempotent console script (`pyproject.toml`'s `[project.scripts]`) that
@@ -42,6 +52,11 @@ other top-level key in the settings file. Not run automatically by the MCP serve
 the repo on every server start would be more invasive than warranted) and for the empirical
 findings (two-gate `command`/`unsandboxed` permissions, literal-only rule matching) this list is
 built from.
+
+This setup step is **agy-specific, not general** — none of the other planned providers (Codex,
+Cursor, Copilot CLI) have an equivalent persisted permission-allowlist file CADET could write
+into; their permission/sandbox behavior is controlled entirely via per-invocation flags instead
+(see [ARCHITECTURE.md](./ARCHITECTURE.md#provider-abstraction)). There is no `cadet-install-<provider>-permissions` for those.
 
 ## Companion script: `cadet-wait-for-job`
 

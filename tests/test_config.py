@@ -17,6 +17,10 @@ _ENV_VARS = [
     "CADET_AGY_SANDBOX",
     "CADET_AGY_PATH",
     "CADET_AGY_SETTINGS_PATH",
+    "CADET_CODEX_PATH",
+    "CADET_CODEX_MODEL",
+    "CADET_CODEX_EFFORT",
+    "CADET_CODEX_SANDBOX",
     "CADET_WEB_HOST",
     "CADET_WEB_PORT",
     "CADET_WEB_ENABLED",
@@ -133,6 +137,53 @@ class TestAgySettingsPath(ConfigTestCase):
         override = os.path.join(self.temp_dir, "custom_settings.json")
         os.environ["CADET_AGY_SETTINGS_PATH"] = override
         self.assertEqual(config.get_agy_settings_path(), override)
+
+
+class TestProviderGenericResolution(ConfigTestCase):
+    def test_resolve_provider_path_agy_delegates_to_resolve_agy_path(self):
+        fake_agy = os.path.join(self.temp_dir, "agy.exe")
+        with open(fake_agy, "w") as f:
+            f.write("")
+        os.environ["CADET_AGY_PATH"] = fake_agy
+        self.assertEqual(config.resolve_provider_path("agy"), fake_agy)
+
+    def test_resolve_provider_path_other_provider_uses_prefixed_env_var(self):
+        fake_codex = os.path.join(self.temp_dir, "codex.exe")
+        with open(fake_codex, "w") as f:
+            f.write("")
+        os.environ["CADET_CODEX_PATH"] = fake_codex
+        self.assertEqual(config.resolve_provider_path("codex"), fake_codex)
+
+    def test_resolve_provider_path_missing_raises(self):
+        with self.assertRaises(RuntimeError):
+            config.resolve_provider_path("codex")
+
+    def test_resolve_provider_path_nonexistent_file_raises(self):
+        os.environ["CADET_CODEX_PATH"] = os.path.join(self.temp_dir, "does_not_exist.exe")
+        with self.assertRaises(RuntimeError):
+            config.resolve_provider_path("codex")
+
+    def test_get_provider_model_effort_sandbox_agy_matches_legacy_getters(self):
+        os.environ["CADET_AGY_MODEL"] = "gemini-3.6-flash-medium"
+        os.environ["CADET_AGY_EFFORT"] = "high"
+        self.assertEqual(config.get_provider_model("agy"), config.get_agy_model())
+        self.assertEqual(config.get_provider_effort("agy"), config.get_agy_effort())
+        self.assertEqual(config.is_provider_sandbox_enabled("agy"), config.is_agy_sandbox_enabled())
+
+    def test_get_provider_model_effort_sandbox_other_provider_uses_own_env_vars(self):
+        os.environ["CADET_CODEX_MODEL"] = "gpt-5.2"
+        os.environ["CADET_CODEX_EFFORT"] = "low"
+        os.environ["CADET_CODEX_SANDBOX"] = "false"
+        self.assertEqual(config.get_provider_model("codex"), "gpt-5.2")
+        self.assertEqual(config.get_provider_effort("codex"), "low")
+        self.assertFalse(config.is_provider_sandbox_enabled("codex"))
+
+    def test_get_provider_model_effort_default_none(self):
+        self.assertIsNone(config.get_provider_model("codex"))
+        self.assertIsNone(config.get_provider_effort("codex"))
+
+    def test_provider_sandbox_defaults_true(self):
+        self.assertTrue(config.is_provider_sandbox_enabled("codex"))
 
 
 class TestWebConfig(ConfigTestCase):

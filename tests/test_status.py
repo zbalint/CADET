@@ -72,7 +72,7 @@ class TestShapeStatusDict(StatusTestCase):
         job = job_store.get_job("job-1", db_path=self.db_path)
         shaped = status.shape_status_dict(job, db_path=self.db_path)
         expected_keys = {
-            "job_id", "label", "context_id", "status", "model", "created_at",
+            "job_id", "label", "context_id", "status", "provider", "model", "created_at",
             "started_at", "elapsed_s", "exit_code", "error_kind",
             "quota_reset_at", "timeout_s", "queue_position",
         }

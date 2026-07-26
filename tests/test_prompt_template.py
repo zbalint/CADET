@@ -82,6 +82,24 @@ class TestRenderPrompt(unittest.TestCase):
         rendered = render_prompt(**args)
         self.assertIn("- Job label: \n", rendered)
 
+    def test_default_agent_identity_matches_agy_defaults(self):
+        # Regression guard: the byte-identical output for agy's defaults must not
+        # drift now that agent_id/display_name are parameterized rather than
+        # hardcoded — this is the same assertion as test_worked_example_semantic_match,
+        # just spelled out explicitly against the (default) agy identity.
+        rendered = render_prompt(**WORKED_EXAMPLE_ARGS)
+        self.assertIn("You are Antigravity (agy), running headless via CADET", rendered)
+        self.assertIn('agent_id="antigravity"', rendered)
+        self.assertIn('owner_id="antigravity"', rendered)
+
+    def test_custom_agent_identity_is_substituted(self):
+        args = dict(WORKED_EXAMPLE_ARGS)
+        rendered = render_prompt(**args, agent_id="codex", display_name="OpenAI Codex CLI")
+        self.assertIn("You are OpenAI Codex CLI, running headless via CADET", rendered)
+        self.assertIn('agent_id="codex"', rendered)
+        self.assertIn('owner_id="codex"', rendered)
+        self.assertNotIn("antigravity", rendered)
+
     def test_prompt_containing_placeholder_like_text_is_not_double_substituted(self):
         args = dict(WORKED_EXAMPLE_ARGS)
         args["prompt"] = "Reference the working directory as {cwd} in your summary."

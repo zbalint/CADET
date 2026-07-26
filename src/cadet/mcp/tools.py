@@ -6,6 +6,7 @@ import uuid
 from cadet import config, status
 from cadet.db import job_store
 from cadet.mcp.server import mcp
+from cadet.process.providers import registry
 from cadet.prompt.template import render_prompt
 
 # Set once by server.py's lifespan hook after the Dispatcher is constructed.
@@ -59,11 +60,13 @@ def _now_iso() -> str:
 @mcp.tool()
 async def delegate_task(
     prompt: str = None, context_id: str = None, cwd: str = None, timeout_s: int = None,
-    label: str = None, model: str = None, effort: str = None, skip_permissions: bool = None,
+    label: str = None, provider: str = None, model: str = None, effort: str = None,
+    skip_permissions: bool = None,
     **kwargs,
 ) -> dict:
-    """Starts a background job running `agy -p "<rendered prompt>"`. Never blocks
-    on the subprocess — returns as soon as the job is queued/dispatched."""
+    """Starts a background job running the chosen provider's CLI (default: agy)
+    as `<provider> -p "<rendered prompt>"`. Never blocks on the subprocess —
+    returns as soon as the job is queued/dispatched."""
     kw = _unwrap_kwargs(kwargs)
     prompt_ = _resolve(prompt, kw, kwargs, "prompt")
     if not prompt_:
@@ -75,10 +78,19 @@ async def delegate_task(
     if not cwd_ or not os.path.isdir(cwd_):
         return {"error": f"cwd is not a valid directory: {cwd_!r}"}
 
+    provider_ = _resolve(provider, kw, kwargs, "provider") or registry.DEFAULT_PROVIDER
+    if provider_ not in registry.names():
+        return {"error": f"unknown provider: {provider_!r}. Supported: {', '.join(registry.names())}"}
+    try:
+        config.resolve_provider_path(provider_)
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    provider_mod = registry.get(provider_)
+
     timeout_s_ = config.clamp_timeout_s(_resolve(timeout_s, kw, kwargs, "timeout_s"))
     label_ = _resolve(label, kw, kwargs, "label")
-    model_ = _resolve(model, kw, kwargs, "model") or config.get_agy_model()
-    effort_ = _resolve(effort, kw, kwargs, "effort") or config.get_agy_effort()
+    model_ = _resolve(model, kw, kwargs, "model") or config.get_provider_model(provider_)
+    effort_ = _resolve(effort, kw, kwargs, "effort") or config.get_provider_effort(provider_)
     skip_permissions_ = _coerce_bool(_resolve(skip_permissions, kw, kwargs, "skip_permissions"))
 
     job_id = "job-" + uuid.uuid4().hex[:12]
@@ -87,14 +99,17 @@ async def delegate_task(
     stdout_log_path = os.path.join(job_log_dir, "stdout.log")
     stderr_log_path = os.path.join(job_log_dir, "stderr.log")
 
-    rendered = render_prompt(context_id_, label_, cwd_, job_id, prompt_)
+    rendered = render_prompt(
+        context_id_, label_, cwd_, job_id, prompt_,
+        agent_id=provider_mod.AGENT_ID, display_name=provider_mod.DISPLAY_NAME,
+    )
     with open(prompt_path, "w", encoding="utf-8") as f:
         f.write(rendered)
 
     created_at = _now_iso()
     job_store.insert_job(
         job_id=job_id, context_id=context_id_, label=label_, prompt_path=prompt_path,
-        cwd=cwd_, model=model_, effort=effort_, skip_permissions=skip_permissions_,
+        cwd=cwd_, provider=provider_, model=model_, effort=effort_, skip_permissions=skip_permissions_,
         status="pending", created_at=created_at, timeout_s=timeout_s_,
         stdout_log_path=stdout_log_path, stderr_log_path=stderr_log_path,
     )

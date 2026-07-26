@@ -10,20 +10,20 @@ def _row_to_dict(row):
 def insert_job(
     job_id, context_id, label, prompt_path, cwd, model, effort, skip_permissions,
     status, created_at, timeout_s, stdout_log_path, stderr_log_path,
-    db_connection=None, db_path=None,
+    provider="agy", db_connection=None, db_path=None,
 ) -> None:
     with managed_connection(db_connection, db_path) as conn:
         with conn:
             conn.execute(
                 """
                 INSERT INTO jobs (
-                    job_id, context_id, label, prompt_path, cwd, model, effort,
+                    job_id, context_id, label, prompt_path, cwd, provider, model, effort,
                     skip_permissions, status, created_at, timeout_s,
                     stdout_log_path, stderr_log_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    job_id, context_id, label, prompt_path, cwd, model, effort,
+                    job_id, context_id, label, prompt_path, cwd, provider, model, effort,
                     1 if skip_permissions else 0, status, created_at, timeout_s,
                     stdout_log_path, stderr_log_path,
                 ),

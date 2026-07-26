@@ -1,7 +1,11 @@
 # CADET
-**C**laude-**A**ntigravity **D**elegation & **E**xecution **T**ool
+**C**laude-**A**gents **D**elegation & **E**xecution **T**ool
 
-CADET is a lightweight MCP server allowing Claude Code to delegate high-speed execution and long-context refactoring tasks to Antigravity CLI
+CADET is a lightweight MCP server allowing Claude Code to delegate high-speed execution and
+long-context refactoring tasks to pluggable CLI coding agents, via a `provider` param on
+`delegate_task`. Today only one provider is actually wired up — `agy` (Antigravity CLI) — with
+Codex CLI, Cursor CLI, and GitHub Copilot CLI planned as separate follow-up phases (see
+`docs/ARCHITECTURE.md`).
 
 > **Status: alpha.** The MCP server and web dashboard are implemented; see the docs in
 > [`docs/`](./docs) for the full architecture spec.
@@ -9,12 +13,14 @@ CADET is a lightweight MCP server allowing Claude Code to delegate high-speed ex
 ## How it fits together
 
 Claude Code is a strong architect but expensive to run for bulk execution work. Antigravity
-(`agy`), running cheap/fast Gemini Flash models, is a capable executor but a weaker architect.
-CADET is the MCP server Claude Code connects to in order to hand off implementation work to `agy`
-as background jobs (`agy -p "<prompt>"`), so Claude plans once and doesn't pay Claude-level cost
-for the grunt work. Both agents separately connect to [SALTMDB](../SALTMDB), an existing shared
-MCP memory server, and thread their work together via a shared `context_id` — CADET itself never
-talks to SALTMDB; it only orchestrates the `agy` subprocess and hands it that `context_id`.
+(`agy`), running cheap/fast Gemini Flash models, is a capable executor but a weaker architect —
+and so are the other free/cheap-tier CLI agents CADET is being widened to support. CADET is the
+MCP server Claude Code connects to in order to hand off implementation work to a chosen provider
+as background jobs (e.g. `agy -p "<prompt>"`), so Claude plans once and doesn't pay Claude-level
+cost for the grunt work. Both agents separately connect to [SALTMDB](../SALTMDB), an existing
+shared MCP memory server, and thread their work together via a shared `context_id` — CADET itself
+never talks to SALTMDB; it only orchestrates the provider's subprocess and hands it that
+`context_id`.
 
 ## Documentation
 

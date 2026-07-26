@@ -51,6 +51,16 @@ class TestInsertAndGet(JobStoreTestCase):
     def test_get_missing_job_returns_none(self):
         self.assertIsNone(job_store.get_job("does-not-exist", db_connection=self.conn))
 
+    def test_provider_defaults_to_agy_when_omitted(self):
+        self._insert()
+        job = job_store.get_job("job-1", db_connection=self.conn)
+        self.assertEqual(job["provider"], "agy")
+
+    def test_provider_round_trips_when_explicit(self):
+        self._insert(provider="codex")
+        job = job_store.get_job("job-1", db_connection=self.conn)
+        self.assertEqual(job["provider"], "codex")
+
 
 class TestMarkRunning(JobStoreTestCase):
     def test_mark_running_from_pending_succeeds(self):

@@ -78,6 +78,50 @@ def resolve_agy_path() -> str:
     return path
 
 
+# --- Provider-generic resolution -------------------------------------------
+# Only "agy" is a real provider today; the functions below are already
+# generalized so a later provider only needs to add its own env vars, not
+# touch this dispatch shape. "agy" is special-cased to keep the legacy
+# CADET_AGY_* env var names intact for backward compatibility.
+
+def _env_prefix(provider: str) -> str:
+    return f"CADET_{provider.upper()}"
+
+
+def resolve_provider_path(provider: str) -> str:
+    """Like resolve_agy_path, but for any provider name. Always required —
+    used by delegate_task's per-call validation, which turns a RuntimeError
+    into a clean {"error": ...} response rather than letting it propagate."""
+    if provider == "agy":
+        return resolve_agy_path()
+    env_var = f"{_env_prefix(provider)}_PATH"
+    path = os.environ.get(env_var)
+    if not path:
+        raise RuntimeError(f"{env_var} is not set. It must be the absolute path to the {provider} executable.")
+    if not os.path.isfile(path):
+        raise RuntimeError(f"{env_var} does not point to an existing file: {path}")
+    return path
+
+
+def get_provider_model(provider: str):
+    if provider == "agy":
+        return get_agy_model()
+    return os.environ.get(f"{_env_prefix(provider)}_MODEL") or None
+
+
+def get_provider_effort(provider: str):
+    if provider == "agy":
+        return get_agy_effort()
+    return os.environ.get(f"{_env_prefix(provider)}_EFFORT") or None
+
+
+def is_provider_sandbox_enabled(provider: str) -> bool:
+    if provider == "agy":
+        return is_agy_sandbox_enabled()
+    val = os.environ.get(f"{_env_prefix(provider)}_SANDBOX", "true")
+    return val.strip().lower() not in ("0", "false", "no", "off")
+
+
 def clamp_timeout_s(timeout_s) -> int:
     if timeout_s is None:
         timeout_s = get_default_timeout_s()

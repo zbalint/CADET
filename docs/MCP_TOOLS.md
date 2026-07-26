@@ -28,20 +28,22 @@ across the MCP boundary.
 
 ### `delegate_task`
 
-Starts a background job running `agy -p "<rendered prompt>"`. Never blocks on the subprocess —
-returns as soon as the job is queued/dispatched.
+Starts a background job running the chosen provider's CLI (default `agy`, e.g.
+`agy -p "<rendered prompt>"`). Never blocks on the subprocess — returns as soon as the job is
+queued/dispatched.
 
 **Params:**
 | Name | Type | Default | Notes |
 |---|---|---|---|
-| `prompt` | str | required | Raw task description (gets wrapped in the standard template — see [PROMPT_PROTOCOL.md](./PROMPT_PROTOCOL.md) — before being handed to `agy`). |
+| `prompt` | str | required | Raw task description (gets wrapped in the standard template — see [PROMPT_PROTOCOL.md](./PROMPT_PROTOCOL.md) — before being handed to the provider CLI). |
 | `context_id` | str | auto-generated | If omitted, CADET generates `"cadet-<uuid4hex[:8]>"` and returns it. Callers should treat the returned value as authoritative and reuse it for related follow-up jobs. |
 | `cwd` | str | `CADET_DEFAULT_CWD` | Validated synchronously (`os.path.isdir`) before returning. Invalid `cwd` returns `{"error": ...}` immediately rather than creating a doomed job. |
-| `timeout_s` | int | `CADET_DEFAULT_TIMEOUT_S` | Clamped to `CADET_MAX_TIMEOUT_S`. Also passed through to `agy` as `--print-timeout` (see [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md)). |
+| `provider` | str | `"agy"` | Which CLI backend runs this job — see [ARCHITECTURE.md](./ARCHITECTURE.md#provider-abstraction). Only `"agy"` is actually wired up today; an unknown name or one whose executable path isn't configured returns `{"error": ...}` immediately, no job row created. |
+| `timeout_s` | int | `CADET_DEFAULT_TIMEOUT_S` | Clamped to `CADET_MAX_TIMEOUT_S`. Also passed through to the provider CLI as its own timeout flag (`--print-timeout` for agy — see [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md)). |
 | `label` | str | `None` | Free-text, non-unique, purely for human/Claude readability in `list_tasks`. |
-| `model` | str | `CADET_AGY_MODEL` | Passed through as `agy --model`. Lets a caller pin a specific tier (e.g. `gemini-3.6-flash-low` for trivial work vs `-high` for harder tasks) instead of always using the configured default. |
-| `effort` | str | `CADET_AGY_EFFORT` | Passed through as `agy --effort` (`low`\|`medium`\|`high`). |
-| `skip_permissions` | bool | `false` | Passed through as `agy --dangerously-skip-permissions` when `true`. Default `false` deliberately — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior). **This is stronger than "removes the soft-deny":** confirmed via `google-antigravity/antigravity-cli#36` (open/unpatched) that it also silently defeats CADET's `--sandbox` flag entirely — with `skip_permissions=True` there is effectively **zero** containment, not partial. Run `cadet-install-agy-permissions` (see [CONFIGURATION.md](./CONFIGURATION.md)) first — most ordinary CADET jobs (tests, read-only git) shouldn't need `skip_permissions=True` at all once the curated allow-list is installed. Only set `true` for tasks in a `cwd` you're comfortable giving fully unrestricted tool access to. |
+| `model` | str | `CADET_AGY_MODEL` (or `CADET_<PROVIDER>_MODEL`) | Passed through as the provider's own `--model` flag. Lets a caller pin a specific tier (e.g. `gemini-3.6-flash-low` for trivial work vs `-high` for harder tasks) instead of always using the configured default. Free-form string, not validated against a known-model list — a mismatched provider/model pair surfaces as a subprocess failure, not a pre-flight error. |
+| `effort` | str | `CADET_AGY_EFFORT` (or `CADET_<PROVIDER>_EFFORT`) | Passed through as the provider's own `--effort`-equivalent flag (`low`\|`medium`\|`high`), where the provider supports one. |
+| `skip_permissions` | bool | `false` | Passed through as agy's `--dangerously-skip-permissions` when `true` (only meaningful for the `agy` provider today). Default `false` deliberately — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior). **This is stronger than "removes the soft-deny":** confirmed via `google-antigravity/antigravity-cli#36` (open/unpatched) that it also silently defeats CADET's `--sandbox` flag entirely — with `skip_permissions=True` there is effectively **zero** containment, not partial. Run `cadet-install-agy-permissions` (see [CONFIGURATION.md](./CONFIGURATION.md)) first — most ordinary CADET jobs (tests, read-only git) shouldn't need `skip_permissions=True` at all once the curated allow-list is installed. Only set `true` for tasks in a `cwd` you're comfortable giving fully unrestricted tool access to. |
 
 **Returns:** `{job_id, status, context_id, queue_position, label, created_at}`
 - `status` is `"pending"` or `"running"` depending on whether a concurrency slot was free.
@@ -53,7 +55,7 @@ Cheap poll: a single SQLite row read, **no log file I/O**. Safe to call frequent
 
 **Params:** `job_id` (str, required).
 
-**Returns:** `{job_id, label, context_id, status, model, created_at, started_at, elapsed_s, exit_code, error_kind, quota_reset_at, timeout_s, queue_position}`
+**Returns:** `{job_id, label, context_id, status, provider, model, created_at, started_at, elapsed_s, exit_code, error_kind, quota_reset_at, timeout_s, queue_position}`
 - `elapsed_s` = `now - started_at` while `running`, `finished_at - started_at` once terminal,
   `null` while still `pending`.
 - `error_kind` is `null` for non-failed jobs, or a best-effort classification such as

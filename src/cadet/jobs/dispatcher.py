@@ -3,9 +3,14 @@ import datetime as dt
 
 from cadet import config
 from cadet.db import job_store
-from cadet.process.launcher import spawn_agy
-from cadet.process.quota import parse_quota_exhaustion
+from cadet.process.providers.agy import spawn as spawn_agy, parse_error as parse_error_agy
 from cadet.process.treekill import kill_process_tree
+
+# NOTE: dispatch dicts referencing spawn_agy/parse_error_agy are built fresh
+# inside run_job (not module scope) so that unittest.mock.patch(
+# "cadet.jobs.dispatcher.spawn_agy", ...) — which rebinds this module's own
+# global name — is still picked up. A module-scope dict built once at import
+# time would freeze the original reference and silently ignore the patch.
 
 
 def _now_iso() -> str:
@@ -26,8 +31,8 @@ class Dispatcher:
     never awaits subprocess completion itself. One long-lived loop (`start`)
     owns dispatch; each dispatched job runs as its own independent task."""
 
-    def __init__(self, agy_path: str, max_concurrent: int | None = None, db_path: str | None = None):
-        self.agy_path = agy_path
+    def __init__(self, executable_paths: dict, max_concurrent: int | None = None, db_path: str | None = None):
+        self.executable_paths = executable_paths
         self.db_path = db_path
         self._queue: asyncio.Queue = asyncio.Queue()
         self._semaphore = asyncio.Semaphore(max_concurrent or config.get_max_concurrent())
@@ -62,12 +67,16 @@ class Dispatcher:
             stdout_fh = open(job["stdout_log_path"], "ab")
             stderr_fh = open(job["stderr_log_path"], "ab")
 
-            proc = await spawn_agy(
-                self.agy_path, prompt_text, job["cwd"], job["timeout_s"],
+            provider_name = job["provider"] or "agy"
+            spawn_fns = {"agy": spawn_agy}
+            spawn_fn = spawn_fns[provider_name]
+
+            proc = await spawn_fn(
+                self.executable_paths[provider_name], prompt_text, job["cwd"], job["timeout_s"],
                 stdout_fh, stderr_fh,
                 model=job["model"], effort=job["effort"],
                 skip_permissions=bool(job["skip_permissions"]),
-                sandbox=config.is_agy_sandbox_enabled(),
+                sandbox=config.is_provider_sandbox_enabled(provider_name),
             )
 
             won = job_store.mark_running(job_id, proc.pid, _now_iso(), db_path=self.db_path)
@@ -101,10 +110,11 @@ class Dispatcher:
             else:
                 status = "failed"
                 stderr_fh.flush()
-                error_kind, quota_reset_at = parse_quota_exhaustion(
+                parse_error_fns = {"agy": parse_error_agy}
+                error_kind, quota_reset_at = parse_error_fns[provider_name](
                     _read_tail(job["stderr_log_path"]), finished_at
                 )
-                error_message = f"agy exited {exit_code}"
+                error_message = f"{provider_name} exited {exit_code}"
 
             job_store.finalize_terminal(
                 job_id, status=status, exit_code=exit_code, finished_at=finished_at,

@@ -18,7 +18,9 @@ class WebApiTestCase(unittest.TestCase):
         conn = init_db(self.db_path)
         conn.close()
 
-        self.dispatcher = Dispatcher(agy_path="C:\\tools\\agy.exe", max_concurrent=2, db_path=self.db_path)
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "C:\\tools\\agy.exe"}, max_concurrent=2, db_path=self.db_path
+        )
         self.app = create_app(self.dispatcher, self.db_path)
         self.client = TestClient(self.app)
 

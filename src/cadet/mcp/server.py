@@ -33,8 +33,13 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     conn = init_db(db_path)
     conn.close()
 
-    agy_path = config.resolve_agy_path()
-    dispatcher = Dispatcher(agy_path=agy_path, max_concurrent=config.get_max_concurrent(), db_path=db_path)
+    # "agy" is required/fail-fast at server bootstrap (see __main__.py); other
+    # providers are optional here — an unconfigured one just isn't in the dict,
+    # and delegate_task rejects requests for it per-call with a clean error.
+    executable_paths = {"agy": config.resolve_agy_path()}
+    dispatcher = Dispatcher(
+        executable_paths=executable_paths, max_concurrent=config.get_max_concurrent(), db_path=db_path
+    )
 
     # Deferred import (not at module load time) to avoid a server<->tools
     # circular import: tools.py imports `mcp` from this module at its own

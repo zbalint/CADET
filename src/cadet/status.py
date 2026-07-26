@@ -30,6 +30,7 @@ def shape_status_dict(job: dict, db_path: str | None = None) -> dict:
         "label": job["label"],
         "context_id": job["context_id"],
         "status": status,
+        "provider": job["provider"],
         "model": job["model"],
         "created_at": job["created_at"],
         "started_at": job["started_at"],
