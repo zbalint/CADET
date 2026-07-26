@@ -1,0 +1,240 @@
+import asyncio
+import datetime as dt
+import os
+import uuid
+
+from cadet import config
+from cadet.db import job_store
+from cadet.mcp.server import mcp
+from cadet.prompt.template import render_prompt
+
+# Set once by server.py's lifespan hook after the Dispatcher is constructed.
+_dispatcher = None
+
+
+def set_dispatcher(dispatcher) -> None:
+    global _dispatcher
+    _dispatcher = dispatcher
+
+
+def _require_dispatcher():
+    if _dispatcher is None:
+        raise RuntimeError("CADET dispatcher not initialized — server_lifespan must run first")
+    return _dispatcher
+
+
+def _unwrap_kwargs(kwargs: dict) -> dict:
+    """FastMCP emits a required 'kwargs' schema field for bare **kwargs params; some clients
+    nest their actual payload under it. Unwrap that nested dict when present, else use kwargs as-is."""
+    return kwargs.get("kwargs", {}) if isinstance(kwargs.get("kwargs"), dict) else kwargs
+
+
+def _resolve(explicit, kw: dict, raw_kwargs: dict, *aliases: str):
+    """Resolve a parameter value: explicit arg wins, then each alias checked against
+    the unwrapped kwargs dict, then against the raw kwargs dict, first alias wins within each."""
+    if explicit is not None:
+        return explicit
+    for source in (kw, raw_kwargs):
+        for alias in aliases:
+            val = source.get(alias)
+            if val is not None:
+                return val
+    return None
+
+
+def _coerce_bool(val, default=False) -> bool:
+    if val is None:
+        return default
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return bool(val)
+
+
+def _now_iso() -> str:
+    return dt.datetime.now().isoformat(timespec="seconds")
+
+
+def _pending_queue_position(job_id: str):
+    pending = sorted(job_store.list_jobs(status_filter="pending", limit=10_000), key=lambda j: j["created_at"])
+    for idx, job in enumerate(pending):
+        if job["job_id"] == job_id:
+            return idx + 1
+    return None
+
+
+def _shape_status_dict(job: dict) -> dict:
+    status = job["status"]
+    elapsed_s = None
+    queue_position = None
+    if status == "pending":
+        queue_position = _pending_queue_position(job["job_id"])
+    elif job["started_at"] and job["finished_at"]:
+        elapsed_s = (dt.datetime.fromisoformat(job["finished_at"]) - dt.datetime.fromisoformat(job["started_at"])).total_seconds()
+    elif job["started_at"]:
+        elapsed_s = (dt.datetime.now() - dt.datetime.fromisoformat(job["started_at"])).total_seconds()
+
+    return {
+        "job_id": job["job_id"],
+        "label": job["label"],
+        "context_id": job["context_id"],
+        "status": status,
+        "model": job["model"],
+        "created_at": job["created_at"],
+        "started_at": job["started_at"],
+        "elapsed_s": elapsed_s,
+        "exit_code": job["exit_code"],
+        "error_kind": job["error_kind"],
+        "quota_reset_at": job["quota_reset_at"],
+        "timeout_s": job["timeout_s"],
+        "queue_position": queue_position,
+    }
+
+
+def _read_log(path, tail_lines=None):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return "", False
+    if tail_lines is None or len(lines) <= tail_lines:
+        return "".join(lines), False
+    return "".join(lines[-tail_lines:]), True
+
+
+@mcp.tool()
+async def delegate_task(
+    prompt: str = None, context_id: str = None, cwd: str = None, timeout_s: int = None,
+    label: str = None, model: str = None, effort: str = None, skip_permissions: bool = None,
+    **kwargs,
+) -> dict:
+    """Starts a background job running `agy -p "<rendered prompt>"`. Never blocks
+    on the subprocess — returns as soon as the job is queued/dispatched."""
+    kw = _unwrap_kwargs(kwargs)
+    prompt_ = _resolve(prompt, kw, kwargs, "prompt")
+    if not prompt_:
+        return {"error": "prompt is required"}
+
+    context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id", "project") \
+        or f"cadet-{uuid.uuid4().hex[:8]}"
+    cwd_ = _resolve(cwd, kw, kwargs, "cwd") or config.get_default_cwd()
+    if not cwd_ or not os.path.isdir(cwd_):
+        return {"error": f"cwd is not a valid directory: {cwd_!r}"}
+
+    timeout_s_ = config.clamp_timeout_s(_resolve(timeout_s, kw, kwargs, "timeout_s"))
+    label_ = _resolve(label, kw, kwargs, "label")
+    model_ = _resolve(model, kw, kwargs, "model") or config.get_agy_model()
+    effort_ = _resolve(effort, kw, kwargs, "effort") or config.get_agy_effort()
+    skip_permissions_ = _coerce_bool(_resolve(skip_permissions, kw, kwargs, "skip_permissions"))
+
+    job_id = "job-" + uuid.uuid4().hex[:12]
+    job_log_dir = config.get_job_log_dir(job_id)
+    prompt_path = os.path.join(job_log_dir, "prompt.txt")
+    stdout_log_path = os.path.join(job_log_dir, "stdout.log")
+    stderr_log_path = os.path.join(job_log_dir, "stderr.log")
+
+    rendered = render_prompt(context_id_, label_, cwd_, job_id, prompt_)
+    with open(prompt_path, "w", encoding="utf-8") as f:
+        f.write(rendered)
+
+    created_at = _now_iso()
+    job_store.insert_job(
+        job_id=job_id, context_id=context_id_, label=label_, prompt_path=prompt_path,
+        cwd=cwd_, model=model_, effort=effort_, skip_permissions=skip_permissions_,
+        status="pending", created_at=created_at, timeout_s=timeout_s_,
+        stdout_log_path=stdout_log_path, stderr_log_path=stderr_log_path,
+    )
+
+    dispatcher = _require_dispatcher()
+    await dispatcher.enqueue(job_id)
+    # Yield a few times so an already-free concurrency slot has a chance to pick
+    # this job up before we read back its status — best-effort, not guaranteed;
+    # the row is always read fresh below rather than predicted.
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    job = job_store.get_job(job_id)
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "context_id": context_id_,
+        "queue_position": _pending_queue_position(job_id) if job["status"] == "pending" else None,
+        "label": label_,
+        "created_at": created_at,
+    }
+
+
+@mcp.tool()
+def check_task_status(job_id: str = None, **kwargs) -> dict:
+    """Cheap poll: a single SQLite row read, no log file I/O."""
+    kw = _unwrap_kwargs(kwargs)
+    job_id_ = _resolve(job_id, kw, kwargs, "job_id")
+    if not job_id_:
+        return {"error": "job_id is required"}
+    job = job_store.get_job(job_id_)
+    if job is None:
+        return {"error": f"no such job: {job_id_}"}
+    return _shape_status_dict(job)
+
+
+@mcp.tool()
+def get_task_output(job_id: str = None, tail_lines: int = None, **kwargs) -> dict:
+    """Reads log files. Safe to call on a still-running job — it peeks at
+    whatever's been flushed so far."""
+    kw = _unwrap_kwargs(kwargs)
+    job_id_ = _resolve(job_id, kw, kwargs, "job_id")
+    if not job_id_:
+        return {"error": "job_id is required"}
+    job = job_store.get_job(job_id_)
+    if job is None:
+        return {"error": f"no such job: {job_id_}"}
+
+    tail_lines_ = _resolve(tail_lines, kw, kwargs, "tail_lines")
+    stdout, stdout_truncated = _read_log(job["stdout_log_path"], tail_lines_)
+    stderr, stderr_truncated = _read_log(job["stderr_log_path"], tail_lines_)
+
+    shaped = _shape_status_dict(job)
+    duration_s = shaped["elapsed_s"]
+
+    return {
+        "job_id": job_id_,
+        "status": job["status"],
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": job["exit_code"],
+        "error_kind": job["error_kind"],
+        "quota_reset_at": job["quota_reset_at"],
+        "duration_s": duration_s,
+        "truncated": stdout_truncated or stderr_truncated,
+        "stdout_log_path": job["stdout_log_path"],
+        "stderr_log_path": job["stderr_log_path"],
+    }
+
+
+@mcp.tool()
+def list_tasks(status_filter: str = None, context_id: str = None, limit: int = None, **kwargs) -> list:
+    kw = _unwrap_kwargs(kwargs)
+    status_filter_ = _resolve(status_filter, kw, kwargs, "status_filter", "status")
+    context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id", "project")
+    limit_ = _resolve(limit, kw, kwargs, "limit") or 20
+    limit_ = min(int(limit_), 200)
+
+    jobs = job_store.list_jobs(status_filter=status_filter_, context_id=context_id_, limit=limit_)
+    return [_shape_status_dict(job) for job in jobs]
+
+
+@mcp.tool()
+async def cancel_task(job_id: str = None, **kwargs) -> dict:
+    """Idempotent — calling on an already-terminal job is a no-op that reports
+    the existing terminal status rather than erroring."""
+    kw = _unwrap_kwargs(kwargs)
+    job_id_ = _resolve(job_id, kw, kwargs, "job_id")
+    if not job_id_:
+        return {"error": "job_id is required"}
+
+    dispatcher = _require_dispatcher()
+    result = await dispatcher.cancel(job_id_)
+    if result is None:
+        return {"error": f"no such job: {job_id_}"}
+    return {"job_id": job_id_, **result}

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cadet"
+version = "0.1.0-alpha.1"
+description = "MCP server for delegating execution work from Claude Code to Antigravity CLI"
+readme = "README.md"
+authors = [{ name = "Balint Zoltan Marton" }]
+license = { text = "AGPL-3.0-only" }
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/zbalint/CADET"
+
+[project.scripts]
+cadet-server = "cadet.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["*"]
