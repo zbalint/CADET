@@ -31,6 +31,15 @@ docs/ARCHITECTURE.md's "Containerized codex execution" section):
   bind-mount of `~/.codex` does NOT work (codex writes to its own config dir
   even during a plain `exec`, e.g. PATH-alias bookkeeping — fails with
   "Read-only file system"); the auth volume must be writable, same as agy's.
+- **Live-tested 2026-07-27 (first post-commit smoke test): codex's own internal exec sandbox
+  (bubblewrap-based, gates BOTH `-s read-only` and `-s workspace-write`) cannot run a single command
+  in this container** — not a missing-package gap, empirically isolated to this Docker Desktop/WSL2
+  host blocking unprivileged user-namespace creation for every container, regardless of CADET's own
+  `--cap-drop`/`--security-opt` flags (even a bare unrestricted `docker run` fails identically).
+  `build_docker_argv` now always runs the inner codex process with
+  `--dangerously-bypass-approvals-and-sandbox` and enforces the read-only/read-write distinction via
+  the `/workspace` bind mount itself (`:ro` vs default `:rw`) instead — kernel VFS enforcement, not
+  subject to the same restriction.
 """
 import asyncio
 import re
@@ -86,14 +95,31 @@ def build_docker_argv(
     network is left alone (never --network none). --add-dir has no codex
     equivalent -- `-C /workspace` (inside build_argv's own cwd param) is
     already the container-side path, never the host cwd, same "never let the
-    inner CLI see a host path" rule as agy's --add-dir."""
+    inner CLI see a host path" rule as agy's --add-dir.
+
+    codex's own internal exec sandbox (bubblewrap-based, gates BOTH
+    `-s read-only` and `-s workspace-write` -- not just the write path) cannot
+    run in this container: empirically confirmed the failure is unprivileged
+    user-namespace creation being blocked at the Docker/host level for every
+    container regardless of CADET's own --cap-drop/--security-opt flags, not
+    a missing bubblewrap package (live-tested 2026-07-27, see
+    ARCHITECTURE.md's "Validated `codex` container behavior"). So the inner
+    codex process here always runs with
+    --dangerously-bypass-approvals-and-sandbox -- CADET's own --cap-drop=ALL /
+    --security-opt=no-new-privileges / --rm / per-job container is the real
+    security boundary, same reasoning as the native-Windows path's
+    abandonment. The read-only/read-write distinction skip_permissions and
+    sandbox represent is instead enforced by the /workspace bind mount itself
+    (:ro vs default :rw) -- kernel VFS enforcement, not subject to the same
+    userns restriction."""
     from cadet import config
     from cadet.process.launcher import container_name_for_job
 
     name = container_name_for_job("codex", job_id)
+    mount_suffix = ":ro" if (sandbox and not skip_permissions) else ""
     argv = [
         "docker", "run", "--rm", "--name", name,
-        "-v", f"{cwd}:/workspace", "-w", "/workspace",
+        "-v", f"{cwd}:/workspace{mount_suffix}", "-w", "/workspace",
         "-v", f"{config.get_codex_auth_volume()}:/root/.codex",
         "--memory", config.get_codex_container_memory(),
         "--cpus", config.get_codex_container_cpus(),
@@ -102,7 +128,7 @@ def build_docker_argv(
         "--security-opt=no-new-privileges",
         image,
     ]
-    argv += build_argv("codex", prompt_text, "/workspace", timeout_s, model, effort, skip_permissions, sandbox)
+    argv += build_argv("codex", prompt_text, "/workspace", timeout_s, model, effort, skip_permissions=True, sandbox=sandbox)
     return argv
 
 

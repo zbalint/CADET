@@ -405,11 +405,31 @@ container invocations, not assumptions:
 - **Found (not yet fixed) a fast-cancel edge case**: cancelling before the container reaches
   "Running" (~0.3s after enqueue) leaves an orphaned `Created`-state container that `--rm` never
   reaps. See "Containerized `codex` execution" above for detail — affects `agy`'s stop path too.
-- **Still unverified** (same posture as `agy`'s equivalent open items): whether `codex`'s own
-  `-s`/sandbox flags behave any differently on Linux vs. the (broken) Windows path; whether an
-  expired `access_token` refreshes silently via `tokens.refresh_token` inside the container the same
-  way it presumably does natively (this session's test used a freshly-valid token); resource-limit
-  adequacy for a realistic job.
+- **Live-tested 2026-07-27 (first post-commit smoke test of `210b4d0`, before this fix): `codex`'s
+  own `-s`/sandbox flags do NOT work on Linux either** — resolves the "still unverified" question
+  below, and the answer is worse than "differently," it's "not at all." A real
+  `delegate_task(provider="codex", ...)` with default flags (no `skip_permissions`) came back
+  dispatcher-`succeeded` but codex itself refused to run the requested git commands:
+  *"the execution sandbox fails before command launch because `bubblewrap` is unavailable."*
+  Root-caused empirically (not assumed): installing `bubblewrap` in the image does NOT fix it —
+  built a scratch image with it installed, then ran `bwrap --unshare-all ... echo hello` under
+  `--cap-drop=ALL --security-opt=no-new-privileges` (fails), under each flag alone (fails), and
+  under **no restricting flags at all** (fails identically) — this Docker Desktop/WSL2 host blocks
+  unprivileged user-namespace creation for every container on this daemon, not something CADET's
+  own security-opt flags cause or can route around. `-s read-only` and `-s workspace-write` both
+  route through this same bubblewrap-gated exec path, so neither sandbox level can execute so much
+  as `git status` here. **Fix applied**: `build_docker_argv` now always runs the inner codex process
+  with `--dangerously-bypass-approvals-and-sandbox` (CADET's own container — `--cap-drop=ALL`,
+  `--security-opt=no-new-privileges`, resource limits, `--rm`, per-job naming — is the real security
+  boundary, same reasoning as the native-Windows path's abandonment above), and recovers the
+  read-only/read-write distinction via the `/workspace` bind mount itself (`:ro` when
+  `skip_permissions=False` and `sandbox=True`, default `:rw` otherwise) — kernel VFS enforcement,
+  not subject to the userns restriction.
+- **Still unverified**: whether an expired `access_token` refreshes silently via
+  `tokens.refresh_token` inside the container the same way it presumably does natively (this
+  session's test used a freshly-valid token); resource-limit adequacy for a realistic job; whether
+  `agy`'s own `--sandbox` flag (also enabled by default) hits the same or a different class of
+  problem — not yet checked, flagged as a follow-up.
 
 ## Validated `codex` CLI behavior
 

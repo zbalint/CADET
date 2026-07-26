@@ -22,12 +22,35 @@ class TestBuildDockerArgv(unittest.TestCase):
         argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
         self.assertEqual(argv[0:5], ["docker", "run", "--rm", "--name", "cadet-codex-job-abc123def456"])
 
-    def test_workspace_bind_mount_uses_host_cwd(self):
+    def test_workspace_bind_mount_uses_host_cwd_read_only_by_default(self):
+        """Default (skip_permissions=False, sandbox=True) mounts /workspace
+        :ro -- codex's own internal sandbox can't run in this container (see
+        module docstring), so the bind mount itself is the read-only
+        enforcement now, not codex's own -s read-only flag."""
         argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
         idx = argv.index("-v")
-        self.assertEqual(argv[idx + 1], f"{CWD}:/workspace")
+        self.assertEqual(argv[idx + 1], f"{CWD}:/workspace:ro")
         self.assertIn("-w", argv)
         self.assertEqual(argv[argv.index("-w") + 1], "/workspace")
+
+    def test_workspace_bind_mount_is_rw_when_skip_permissions(self):
+        argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID, skip_permissions=True)
+        idx = argv.index("-v")
+        self.assertEqual(argv[idx + 1], f"{CWD}:/workspace")
+
+    def test_workspace_bind_mount_is_rw_when_sandbox_disabled(self):
+        argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID, sandbox=False)
+        idx = argv.index("-v")
+        self.assertEqual(argv[idx + 1], f"{CWD}:/workspace")
+
+    def test_inner_codex_always_bypasses_its_own_sandbox(self):
+        """codex's own bubblewrap-based sandbox cannot run in this container
+        regardless of skip_permissions/sandbox -- those knobs now only steer
+        the /workspace mount mode, while the inner codex process always gets
+        --dangerously-bypass-approvals-and-sandbox so it can execute at all."""
+        argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", argv)
+        self.assertNotIn("-s", argv)
 
     def test_auth_volume_mounted(self):
         argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
