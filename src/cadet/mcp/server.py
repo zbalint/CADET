@@ -11,6 +11,7 @@ from cadet.db.schema import init_db
 from cadet.jobs.dispatcher import Dispatcher
 from cadet.jobs.reconcile import reconcile_on_startup
 from cadet.jobs.retention import retention_sweep_loop
+from cadet.web.server import run_web_server
 
 logging.basicConfig(
     stream=sys.stderr,  # MUST be stderr — stdout is the MCP stdio transport.
@@ -49,11 +50,13 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
 
     dispatcher.start()
     retention_task = asyncio.create_task(retention_sweep_loop(_RETENTION_SWEEP_INTERVAL_S, db_path=db_path))
+    web_task = asyncio.create_task(run_web_server(dispatcher, db_path))
 
     try:
         yield {}
     finally:
         retention_task.cancel()
+        web_task.cancel()
         logger.info("CADET server shutting down.")
 
 

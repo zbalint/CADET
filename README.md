@@ -3,8 +3,8 @@
 
 CADET is a lightweight MCP server allowing Claude Code to delegate high-speed execution and long-context refactoring tasks to Antigravity CLI
 
-> **Status: design-only.** No server code exists yet. The documents in [`docs/`](./docs) are the
-> full architecture spec; a future session implements directly from them.
+> **Status: alpha.** The MCP server and web dashboard are implemented; see the docs in
+> [`docs/`](./docs) for the full architecture spec.
 
 ## How it fits together
 
@@ -23,3 +23,4 @@ talks to SALTMDB; it only orchestrates the `agy` subprocess and hands it that `c
 - [`docs/JOB_LIFECYCLE.md`](./docs/JOB_LIFECYCLE.md) — job state machine, dispatcher/concurrency, startup reconciliation
 - [`docs/PROMPT_PROTOCOL.md`](./docs/PROMPT_PROTOCOL.md) — how a delegated prompt is templated and handed to `agy`
 - [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) — env vars, directory layout, log retention
+- [`docs/WEB_DASHBOARD.md`](./docs/WEB_DASHBOARD.md) — local dashboard for viewing/cancelling tasks

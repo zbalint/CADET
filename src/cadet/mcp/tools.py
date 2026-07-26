@@ -3,7 +3,7 @@ import datetime as dt
 import os
 import uuid
 
-from cadet import config
+from cadet import config, status
 from cadet.db import job_store
 from cadet.mcp.server import mcp
 from cadet.prompt.template import render_prompt
@@ -54,53 +54,6 @@ def _coerce_bool(val, default=False) -> bool:
 
 def _now_iso() -> str:
     return dt.datetime.now().isoformat(timespec="seconds")
-
-
-def _pending_queue_position(job_id: str):
-    pending = sorted(job_store.list_jobs(status_filter="pending", limit=10_000), key=lambda j: j["created_at"])
-    for idx, job in enumerate(pending):
-        if job["job_id"] == job_id:
-            return idx + 1
-    return None
-
-
-def _shape_status_dict(job: dict) -> dict:
-    status = job["status"]
-    elapsed_s = None
-    queue_position = None
-    if status == "pending":
-        queue_position = _pending_queue_position(job["job_id"])
-    elif job["started_at"] and job["finished_at"]:
-        elapsed_s = (dt.datetime.fromisoformat(job["finished_at"]) - dt.datetime.fromisoformat(job["started_at"])).total_seconds()
-    elif job["started_at"]:
-        elapsed_s = (dt.datetime.now() - dt.datetime.fromisoformat(job["started_at"])).total_seconds()
-
-    return {
-        "job_id": job["job_id"],
-        "label": job["label"],
-        "context_id": job["context_id"],
-        "status": status,
-        "model": job["model"],
-        "created_at": job["created_at"],
-        "started_at": job["started_at"],
-        "elapsed_s": elapsed_s,
-        "exit_code": job["exit_code"],
-        "error_kind": job["error_kind"],
-        "quota_reset_at": job["quota_reset_at"],
-        "timeout_s": job["timeout_s"],
-        "queue_position": queue_position,
-    }
-
-
-def _read_log(path, tail_lines=None):
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-    except OSError:
-        return "", False
-    if tail_lines is None or len(lines) <= tail_lines:
-        return "".join(lines), False
-    return "".join(lines[-tail_lines:]), True
 
 
 @mcp.tool()
@@ -159,7 +112,7 @@ async def delegate_task(
         "job_id": job_id,
         "status": job["status"],
         "context_id": context_id_,
-        "queue_position": _pending_queue_position(job_id) if job["status"] == "pending" else None,
+        "queue_position": status.pending_queue_position(job_id) if job["status"] == "pending" else None,
         "label": label_,
         "created_at": created_at,
     }
@@ -175,7 +128,7 @@ def check_task_status(job_id: str = None, **kwargs) -> dict:
     job = job_store.get_job(job_id_)
     if job is None:
         return {"error": f"no such job: {job_id_}"}
-    return _shape_status_dict(job)
+    return status.shape_status_dict(job)
 
 
 @mcp.tool()
@@ -191,10 +144,10 @@ def get_task_output(job_id: str = None, tail_lines: int = None, **kwargs) -> dic
         return {"error": f"no such job: {job_id_}"}
 
     tail_lines_ = _resolve(tail_lines, kw, kwargs, "tail_lines")
-    stdout, stdout_truncated = _read_log(job["stdout_log_path"], tail_lines_)
-    stderr, stderr_truncated = _read_log(job["stderr_log_path"], tail_lines_)
+    stdout, stdout_truncated = status.read_log(job["stdout_log_path"], tail_lines_)
+    stderr, stderr_truncated = status.read_log(job["stderr_log_path"], tail_lines_)
 
-    shaped = _shape_status_dict(job)
+    shaped = status.shape_status_dict(job)
     duration_s = shaped["elapsed_s"]
 
     return {
@@ -218,10 +171,10 @@ def list_tasks(status_filter: str = None, context_id: str = None, limit: int = N
     status_filter_ = _resolve(status_filter, kw, kwargs, "status_filter", "status")
     context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id", "project")
     limit_ = _resolve(limit, kw, kwargs, "limit") or 20
-    limit_ = min(int(limit_), 200)
+    limit_ = max(1, min(int(limit_), 200))
 
     jobs = job_store.list_jobs(status_filter=status_filter_, context_id=context_id_, limit=limit_)
-    return [_shape_status_dict(job) for job in jobs]
+    return [status.shape_status_dict(job) for job in jobs]
 
 
 @mcp.tool()

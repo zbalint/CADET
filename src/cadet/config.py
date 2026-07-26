@@ -82,3 +82,16 @@ def clamp_timeout_s(timeout_s) -> int:
     if timeout_s is None:
         timeout_s = get_default_timeout_s()
     return min(int(timeout_s), get_max_timeout_s())
+
+
+def get_web_host() -> str:
+    return os.environ.get("CADET_WEB_HOST", "127.0.0.1")
+
+
+def get_web_port() -> int:
+    return int(os.environ.get("CADET_WEB_PORT", "8420"))
+
+
+def is_web_enabled() -> bool:
+    val = os.environ.get("CADET_WEB_ENABLED", "true")
+    return val.strip().lower() not in ("0", "false", "no", "off")

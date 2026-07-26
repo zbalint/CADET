@@ -17,6 +17,9 @@ _ENV_VARS = [
     "CADET_AGY_SANDBOX",
     "CADET_AGY_PATH",
     "CADET_AGY_SETTINGS_PATH",
+    "CADET_WEB_HOST",
+    "CADET_WEB_PORT",
+    "CADET_WEB_ENABLED",
 ]
 
 
@@ -130,6 +133,29 @@ class TestAgySettingsPath(ConfigTestCase):
         override = os.path.join(self.temp_dir, "custom_settings.json")
         os.environ["CADET_AGY_SETTINGS_PATH"] = override
         self.assertEqual(config.get_agy_settings_path(), override)
+
+
+class TestWebConfig(ConfigTestCase):
+    def test_defaults(self):
+        self.assertEqual(config.get_web_host(), "127.0.0.1")
+        self.assertEqual(config.get_web_port(), 8420)
+        self.assertTrue(config.is_web_enabled())
+
+    def test_overrides(self):
+        os.environ["CADET_WEB_HOST"] = "0.0.0.0"
+        os.environ["CADET_WEB_PORT"] = "9000"
+        self.assertEqual(config.get_web_host(), "0.0.0.0")
+        self.assertEqual(config.get_web_port(), 9000)
+
+    def test_enabled_flag_falsy_values(self):
+        for val in ("0", "false", "False", "no", "off"):
+            os.environ["CADET_WEB_ENABLED"] = val
+            self.assertFalse(config.is_web_enabled(), msg=f"expected falsy for {val!r}")
+
+    def test_enabled_flag_truthy_values(self):
+        for val in ("1", "true", "True", "yes", "on"):
+            os.environ["CADET_WEB_ENABLED"] = val
+            self.assertTrue(config.is_web_enabled(), msg=f"expected truthy for {val!r}")
 
 
 class TestClampTimeout(ConfigTestCase):

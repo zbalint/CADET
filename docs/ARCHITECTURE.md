@@ -48,9 +48,16 @@ to Antigravity, instead of paying Claude-level cost for grunt work.
 `job_id` (CADET-internal, one per `delegate_task` call) is a different, narrower identifier than
 `context_id` (a SALTMDB thread that may outlive any single job) — don't conflate them.
 
+## Web dashboard
+
+CADET embeds a small read-mostly HTTP dashboard (view ongoing/finished tasks, task detail, cancel)
+in the *same* process and asyncio event loop as the MCP stdio server — see
+[WEB_DASHBOARD.md](./WEB_DASHBOARD.md) for routes, the in-process constraint, and security
+defaults. `agy -p` subprocess remains the only invocation surface; the dashboard is observability
+and control over jobs CADET already runs, not a second way to submit work.
+
 ## Non-goals
 
-- No HTTP API — `agy -p` subprocess is the only known invocation surface.
 - No sandboxing mechanism built *by* CADET — but CADET does enable `agy`'s own native
   `--sandbox` flag by default for delegated runs (see [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md)),
   since an unattended, unsupervised job is exactly the scenario that flag exists for. CADET

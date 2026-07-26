@@ -19,6 +19,9 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 | `CADET_AGY_EFFORT` | none (agy's own default) | Passed through as `agy --effort` unless overridden per-call. One of `low`\|`medium`\|`high`. |
 | `CADET_AGY_SANDBOX` | `true` | Whether to pass `agy --sandbox` on every launch. See [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md#process-management) for why this defaults on — and [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior) for why it's weaker protection than the name implies (silently defeated by `skip_permissions=True`; blocks routine commands outright on Windows without matching `unsandboxed(...)` grants). |
 | `CADET_AGY_SETTINGS_PATH` | `~/.gemini/antigravity-cli/settings.json` | Where `cadet-install-agy-permissions` reads/writes `agy`'s permission config. Override mainly for testing — `agy` itself has no flag to point at an alternate settings file, so this only affects CADET's own tooling, not what `agy` actually reads at runtime. |
+| `CADET_WEB_ENABLED` | `true` | Whether to start the embedded web dashboard (see [WEB_DASHBOARD.md](./WEB_DASHBOARD.md)) alongside the MCP server. |
+| `CADET_WEB_HOST` | `127.0.0.1` | Bind host for the dashboard. Loopback-only by default — there's no authentication, so only change this if you understand the exposure. |
+| `CADET_WEB_PORT` | `8420` | Bind port for the dashboard. |
 
 ## Setup step: `cadet-install-agy-permissions`
 

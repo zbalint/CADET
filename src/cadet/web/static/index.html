@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CADET Dashboard</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>CADET <span class="topbar-sub">task dashboard</span></h1>
+  <div class="topbar-status">
+    <span id="health-dot" class="health-dot" title="checking..."></span>
+    <span id="health-text">checking…</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="list-pane">
+    <div class="list-controls">
+      <input id="filter-context" type="text" placeholder="filter by context_id…">
+      <select id="filter-status">
+        <option value="">all statuses</option>
+        <option value="pending">pending</option>
+        <option value="running">running</option>
+        <option value="succeeded">succeeded</option>
+        <option value="failed">failed</option>
+        <option value="timeout">timeout</option>
+        <option value="cancelled">cancelled</option>
+        <option value="unknown-interrupted">unknown-interrupted</option>
+      </select>
+      <button id="refresh-btn" title="Refresh now">⟳</button>
+    </div>
+
+    <div class="group">
+      <h2>Ongoing <span id="ongoing-count" class="count-badge">0</span></h2>
+      <ul id="ongoing-list" class="task-list"></ul>
+      <p id="ongoing-empty" class="empty-msg">No ongoing tasks.</p>
+    </div>
+
+    <div class="group">
+      <h2>Finished <span id="finished-count" class="count-badge">0</span></h2>
+      <ul id="finished-list" class="task-list"></ul>
+      <p id="finished-empty" class="empty-msg">No finished tasks yet.</p>
+    </div>
+  </section>
+
+  <section class="detail-pane">
+    <div id="detail-empty" class="detail-empty">Select a task to see details.</div>
+
+    <div id="detail-content" class="detail-content" hidden>
+      <div class="detail-header">
+        <div>
+          <h2 id="detail-label">—</h2>
+          <code id="detail-job-id"></code>
+        </div>
+        <div class="detail-actions">
+          <span id="detail-status-badge" class="status-badge">—</span>
+          <button id="cancel-btn" hidden>Cancel</button>
+        </div>
+      </div>
+
+      <dl class="meta-grid" id="detail-meta"></dl>
+
+      <div class="log-tabs">
+        <button class="log-tab active" data-log="stdout">stdout</button>
+        <button class="log-tab" data-log="stderr">stderr</button>
+        <label class="tail-toggle">
+          <input type="checkbox" id="tail-toggle" checked>
+          tail (last 200 lines)
+        </label>
+      </div>
+      <pre id="log-body" class="log-body"></pre>
+    </div>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
