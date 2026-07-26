@@ -1,2 +1,25 @@
 # CADET
+**C**laude-**A**ntigravity **D**elegation & **E**xecution **T**ool
+
 CADET is a lightweight MCP server allowing Claude Code to delegate high-speed execution and long-context refactoring tasks to Antigravity CLI
+
+> **Status: design-only.** No server code exists yet. The documents in [`docs/`](./docs) are the
+> full architecture spec; a future session implements directly from them.
+
+## How it fits together
+
+Claude Code is a strong architect but expensive to run for bulk execution work. Antigravity
+(`agy`), running cheap/fast Gemini Flash models, is a capable executor but a weaker architect.
+CADET is the MCP server Claude Code connects to in order to hand off implementation work to `agy`
+as background jobs (`agy -p "<prompt>"`), so Claude plans once and doesn't pay Claude-level cost
+for the grunt work. Both agents separately connect to [SALTMDB](../SALTMDB), an existing shared
+MCP memory server, and thread their work together via a shared `context_id` — CADET itself never
+talks to SALTMDB; it only orchestrates the `agy` subprocess and hands it that `context_id`.
+
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) — actors, diagram, non-goals, on-disk layout, open risks
+- [`docs/MCP_TOOLS.md`](./docs/MCP_TOOLS.md) — the five MCP tools (`delegate_task`, `check_task_status`, `get_task_output`, `list_tasks`, `cancel_task`)
+- [`docs/JOB_LIFECYCLE.md`](./docs/JOB_LIFECYCLE.md) — job state machine, dispatcher/concurrency, startup reconciliation
+- [`docs/PROMPT_PROTOCOL.md`](./docs/PROMPT_PROTOCOL.md) — how a delegated prompt is templated and handed to `agy`
+- [`docs/CONFIGURATION.md`](./docs/CONFIGURATION.md) — env vars, directory layout, log retention
