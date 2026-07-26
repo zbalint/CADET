@@ -11,6 +11,7 @@ from cadet.db.schema import init_db
 from cadet.jobs.dispatcher import Dispatcher
 from cadet.jobs.reconcile import reconcile_on_startup
 from cadet.jobs.retention import retention_sweep_loop
+from cadet.process.providers import registry
 from cadet.web.server import run_web_server
 
 logging.basicConfig(
@@ -37,6 +38,13 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     # providers are optional here — an unconfigured one just isn't in the dict,
     # and delegate_task rejects requests for it per-call with a clean error.
     executable_paths = {"agy": config.resolve_agy_path()}
+    for provider_name in registry.names():
+        if provider_name == "agy":
+            continue
+        try:
+            executable_paths[provider_name] = config.resolve_provider_path(provider_name)
+        except RuntimeError:
+            pass
     dispatcher = Dispatcher(
         executable_paths=executable_paths, max_concurrent=config.get_max_concurrent(), db_path=db_path
     )

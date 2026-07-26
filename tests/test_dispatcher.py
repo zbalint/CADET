@@ -164,6 +164,20 @@ class TestRunJobLifecycle(DispatcherTestCase):
         self.assertEqual(job["status"], "failed")
         self.assertIn("CADET internal error", job["error_message"])
 
+    async def test_configured_codex_provider_dispatches_via_spawn_codex(self):
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "C:\\tools\\agy.exe", "codex": "C:\\tools\\codex.exe"},
+            max_concurrent=2, db_path=self.db_path,
+        )
+        self._create_pending_job(provider="codex")
+        with patch("cadet.jobs.dispatcher.spawn_codex", AsyncMock(return_value=_make_proc(pid=444, wait_return=0))):
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-1")
+
+        job = job_store.get_job("job-1", db_path=self.db_path)
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(job["pid"], 444)
+
 
 class TestCancel(DispatcherTestCase):
     async def test_cancel_pending_job(self):

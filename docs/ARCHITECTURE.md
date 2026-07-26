@@ -48,12 +48,14 @@ Each provider is a plain Python module under `src/cadet/process/providers/` expo
 `provider` param (default `"agy"`) selects which module handles a job; `src/cadet/process/
 providers/registry.py` is the single source of truth for which provider names are known.
 
-**Only `agy` is actually wired up today.** Codex CLI, Cursor CLI, and GitHub Copilot CLI are
-planned as separate follow-up phases, each gated on an empirical validation pass against the real
-installed binary — vendor docs leave real ambiguity about whether each CLI's default invocation
-actually applies edits or silently no-ops (e.g. Codex defaults to a read-only sandbox; Cursor
-needs `--force` just to apply anything). It's an accepted outcome if a given provider ends up
-only safely usable for read-only/analysis tasks initially.
+**`agy` and `codex` are wired up today.** Cursor CLI and GitHub Copilot CLI are planned as
+separate follow-up phases, each gated on an empirical validation pass against the real installed
+binary — vendor docs leave real ambiguity about whether each CLI's default invocation actually
+applies edits or silently no-ops (e.g. Cursor reportedly needs `--force` just to apply anything).
+It's an accepted outcome if a given provider ends up only safely usable for read-only/analysis
+tasks initially — this is exactly what happened with `codex`'s default (see "Validated `codex`
+CLI behavior" below): its safe default is read-only, and real edits require `skip_permissions=True`
+on this platform until an upstream Windows bug is fixed.
 
 ## The `context_id` thread
 
@@ -223,6 +225,45 @@ command in [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md) is built around, not assumptio
   pool the job's requested `model` draws from, not global. See "Quota exhaustion detection" below
   for how CADET surfaces this.
 
+## Validated `codex` CLI behavior
+
+Confirmed empirically against the installed CLI (`codex` CLI, Windows), on 2026-07-26 — real
+invocations against a scratch directory, not vendor docs alone:
+
+- **`codex exec "<prompt>" -C <cwd> -s workspace-write` silently no-ops on Windows.** Exit code
+  `0`, but the target file was never written. `codex`'s own stderr revealed why:
+  `windows sandbox: orchestrator_helper_launch_failed: ... helper=codex-windows-sandbox-setup.exe,
+  error=program not found` — the OS-level write-enforcement helper `workspace-write` depends on
+  isn't launching in this install. `codex` itself detects the failure and reports it in its
+  final message, but the **process exit code stays 0** — the same false-success shape already
+  documented for `agy` above, just with a different root cause. **Do not treat
+  `workspace-write` as functional for real edits on this platform** until the helper issue is
+  fixed upstream (or a working install is confirmed).
+- **`-s read-only` runs cleanly** (vendor default) — confirmed via a real invocation that doesn't
+  attempt any writes. Safe, but by definition cannot apply edits.
+- **`--dangerously-bypass-approvals-and-sandbox` is the only flag confirmed to actually apply
+  edits headlessly.** Reproduced directly: `codex exec "create hello.txt..." -C <scratch-dir>
+  --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check` produced the file with the
+  exact requested content, exit code `0`. CADET maps this to the existing `skip_permissions`
+  param (mirrors `agy`'s `--dangerously-skip-permissions`) — **`codex` jobs are read-only unless
+  the caller explicitly opts into `skip_permissions=True`,** since the "safe middle ground"
+  (`workspace-write`) doesn't work on this platform yet.
+- **`codex exec` always attempts to read stdin**, printing `Reading additional input from
+  stdin...` even when the prompt is passed as an argv argument (not just when no prompt is
+  given). This matters specifically because CADET spawns it as a long-lived subprocess of its own
+  MCP server — without an explicit redirect, the child would inherit the server's own stdio
+  transport pipe as its stdin. `providers/codex.py`'s `spawn()` explicitly sets
+  `stdin=subprocess.DEVNULL` to guarantee immediate EOF and rule this out; confirmed via a live
+  run that `/dev/null` stdin doesn't hang or change behavior.
+- **`-m/--model` and `-c model_reasoning_effort=<value>` both confirmed to parse and take
+  effect** via a real invocation (`-m gpt-5.6-terra -c model_reasoning_effort=low`, matching the
+  field name already used in the user's own `~/.codex/config.toml`).
+- **No confirmed quota-exhaustion wording.** Unlike `agy`'s reproduced "Individual quota reached"
+  string, no real quota exhaustion was observed during validation (forcing one would burn real
+  quota). `providers/codex.py`'s `parse_error` has a best-effort regex based on community reports
+  of "usage limit reached" phrasing, explicitly marked unconfirmed in its docstring — same
+  opportunistic-enrichment posture as `agy`'s parser, not a correctness requirement.
+
 ## Quota exhaustion detection
 
 Because the failure text above is a real, current, machine-parseable format (not a guess), CADET
@@ -286,3 +327,11 @@ than CADET building a new notification channel of its own.
    under one `context_id` instead of relying solely on `agy` cold-reading SALTMDB each time. Not
    adopted in v1 because it's unverified whether `-p` (print) mode exposes the new conversation's
    ID anywhere capturable by CADET after a run. Worth revisiting once that's confirmed.
+7. **Quota-exhaustion wording is only empirically confirmed for `agy`.** `codex`'s `parse_error`
+   (and any future `cursor`/`copilot` equivalent) is a best-effort guess at vendor wording, never
+   validated against a real exhausted-quota failure — forcing one deliberately to test it wasn't
+   attempted, since it burns real quota. Until each provider has its own confirmed reproduction
+   (the next time one is naturally exhausted during real usage — capture the exact stderr then), a
+   `null` `error_kind` on a failed non-agy job does **not** mean "definitely not a quota issue" —
+   it may just mean the guessed regex didn't match. Check raw `stderr` via `get_task_output`
+   rather than trusting `error_kind` alone for non-agy providers in the meantime.

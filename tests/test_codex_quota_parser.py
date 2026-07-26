@@ -1,0 +1,37 @@
+import unittest
+
+from cadet.process.providers.codex import parse_error
+
+# NOTE: this exact wording is UNCONFIRMED (see codex.py's module docstring) —
+# no real quota exhaustion was observed during empirical validation. These
+# tests cover the parser's mechanics against a plausible shape, not a
+# vendor-verified string.
+PLAUSIBLE_QUOTA_STDERR = "Error: usage limit reached. Try again in 5h30m.\n"
+
+
+class TestParseError(unittest.TestCase):
+    def test_matches_plausible_wording(self):
+        error_kind, quota_reset_at = parse_error(PLAUSIBLE_QUOTA_STDERR, "2026-07-26T00:00:00")
+        self.assertEqual(error_kind, "quota_exhausted")
+        self.assertEqual(quota_reset_at, "2026-07-26T05:30:00")
+
+    def test_no_match_returns_none_none(self):
+        stderr = "Error: Exit code: 1\nsome unrelated failure"
+        self.assertEqual(parse_error(stderr, "2026-07-26T00:00:00"), (None, None))
+
+    def test_empty_stderr_returns_none_none(self):
+        self.assertEqual(parse_error("", "2026-07-26T00:00:00"), (None, None))
+        self.assertEqual(parse_error(None, "2026-07-26T00:00:00"), (None, None))
+
+    def test_sandbox_helper_failure_does_not_falsely_match_as_quota(self):
+        # Real stderr text captured during empirical validation (see codex.py).
+        stderr = (
+            "windows sandbox: orchestrator_helper_launch_failed: setup refresh "
+            "failed to launch helper: helper=codex-windows-sandbox-setup.exe, "
+            "error=program not found"
+        )
+        self.assertEqual(parse_error(stderr, "2026-07-26T00:00:00"), (None, None))
+
+
+if __name__ == "__main__":
+    unittest.main()
