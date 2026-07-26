@@ -58,6 +58,12 @@ def is_agy_sandbox_enabled() -> bool:
     return val.strip().lower() not in ("0", "false", "no", "off")
 
 
+def get_agy_settings_path() -> str:
+    return os.path.expanduser(
+        os.environ.get("CADET_AGY_SETTINGS_PATH", "~/.gemini/antigravity-cli/settings.json")
+    )
+
+
 def resolve_agy_path() -> str:
     """Resolve and validate CADET_AGY_PATH. Fails fast (raises) rather than deferring
     the error to the first delegate_task call, since an MCP-launched process often

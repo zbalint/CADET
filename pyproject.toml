@@ -19,6 +19,7 @@ Homepage = "https://github.com/zbalint/CADET"
 
 [project.scripts]
 cadet-server = "cadet.__main__:main"
+cadet-install-agy-permissions = "cadet.process.agy_permissions:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

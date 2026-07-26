@@ -17,7 +17,28 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 | `CADET_LOG_RETENTION_DAYS` | `14` | Terminal jobs' log directories and DB rows older than this are swept on startup and by a periodic in-process sweep (an `asyncio.sleep` loop — no external scheduler needed). |
 | `CADET_AGY_MODEL` | none (agy's own default) | Passed through as `agy --model` unless overridden per-call by `delegate_task`'s `model` param. E.g. `gemini-3.6-flash-medium`. |
 | `CADET_AGY_EFFORT` | none (agy's own default) | Passed through as `agy --effort` unless overridden per-call. One of `low`\|`medium`\|`high`. |
-| `CADET_AGY_SANDBOX` | `true` | Whether to pass `agy --sandbox` on every launch. See [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md#process-management) for why this defaults on. |
+| `CADET_AGY_SANDBOX` | `true` | Whether to pass `agy --sandbox` on every launch. See [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md#process-management) for why this defaults on — and [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior) for why it's weaker protection than the name implies (silently defeated by `skip_permissions=True`; blocks routine commands outright on Windows without matching `unsandboxed(...)` grants). |
+| `CADET_AGY_SETTINGS_PATH` | `~/.gemini/antigravity-cli/settings.json` | Where `cadet-install-agy-permissions` reads/writes `agy`'s permission config. Override mainly for testing — `agy` itself has no flag to point at an alternate settings file, so this only affects CADET's own tooling, not what `agy` actually reads at runtime. |
+
+## Setup step: `cadet-install-agy-permissions`
+
+A manual, one-time, idempotent console script (`pyproject.toml`'s `[project.scripts]`) that
+additively merges a curated `permissions.allow` list — read-only git inspection plus running the
+delegated repo's test suite, see `src/cadet/process/agy_permissions.py` for the exact list — into
+`agy`'s real settings.json, so that ordinary CADET jobs (tests, `git status`/`log`/`show`) don't
+need `skip_permissions=True` at all. Run it once after installing CADET:
+
+```
+cadet-install-agy-permissions          # merges, reports what was added vs. already present
+cadet-install-agy-permissions --check  # reports drift without writing; exit 1 if anything's missing
+```
+
+Never removes or overwrites an existing entry (curated or user-added) and never touches any
+other top-level key in the settings file. Not run automatically by the MCP server — see
+[ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior) for why (mutating a file outside
+the repo on every server start would be more invasive than warranted) and for the empirical
+findings (two-gate `command`/`unsandboxed` permissions, literal-only rule matching) this list is
+built from.
 
 ## `CADET_AGY_PATH` must be absolute
 

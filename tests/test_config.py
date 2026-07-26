@@ -16,6 +16,7 @@ _ENV_VARS = [
     "CADET_AGY_EFFORT",
     "CADET_AGY_SANDBOX",
     "CADET_AGY_PATH",
+    "CADET_AGY_SETTINGS_PATH",
 ]
 
 
@@ -116,6 +117,19 @@ class TestResolveAgyPath(ConfigTestCase):
             f.write("")
         os.environ["CADET_AGY_PATH"] = fake_agy
         self.assertEqual(config.resolve_agy_path(), fake_agy)
+
+
+class TestAgySettingsPath(ConfigTestCase):
+    def test_defaults_to_gemini_antigravity_cli_settings(self):
+        self.assertEqual(
+            config.get_agy_settings_path(),
+            os.path.expanduser("~/.gemini/antigravity-cli/settings.json"),
+        )
+
+    def test_override(self):
+        override = os.path.join(self.temp_dir, "custom_settings.json")
+        os.environ["CADET_AGY_SETTINGS_PATH"] = override
+        self.assertEqual(config.get_agy_settings_path(), override)
 
 
 class TestClampTimeout(ConfigTestCase):

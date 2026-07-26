@@ -121,11 +121,17 @@ liveness check are accepted as a known, low-probability edge case.
     would just produce a plan without doing the work.
   - **`--sandbox`** defaults on (see `CADET_AGY_SANDBOX` in [CONFIGURATION.md](./CONFIGURATION.md))
     as a cheap, already-built containment layer appropriate for an unattended job nobody is
-    watching in real time.
+    watching in real time — but treat it as best-effort, not a guarantee: it's silently defeated
+    entirely when `skip_permissions=True` (`agy` issue #36), and on Windows it also blocks
+    routine command execution (Python, git) outright without a matching `unsandboxed(...)`
+    permission grant, regardless of `skip_permissions`. See
+    [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior) for the full findings and
+    `cadet-install-agy-permissions` (in [CONFIGURATION.md](./CONFIGURATION.md)) for the fix.
   - **`--dangerously-skip-permissions`** is opt-in per job (`skip_permissions` param on
     `delegate_task`, default `false`) — omitted by default so `agy`'s permission soft-deny
     behavior stays as a safety net; see the permission-handling note in
-    [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior).
+    [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior). Setting it also disables
+    `--sandbox`'s protection entirely, not just the permission prompts.
 - **Timeout**: enforced via `asyncio.wait_for(proc.wait(), timeout=job.timeout_s)`; on
   `TimeoutError`, tree-kill (below), reap with `await proc.wait()`, then the conditional `UPDATE`
   sets `timeout`.

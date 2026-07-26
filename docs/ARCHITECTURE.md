@@ -54,7 +54,14 @@ to Antigravity, instead of paying Claude-level cost for grunt work.
 - No sandboxing mechanism built *by* CADET — but CADET does enable `agy`'s own native
   `--sandbox` flag by default for delegated runs (see [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md)),
   since an unattended, unsupervised job is exactly the scenario that flag exists for. CADET
-  doesn't invent containment; it just turns on the containment `agy` already ships.
+  doesn't invent containment; it just turns on the containment `agy` already ships. **This is
+  weaker than it sounds — see "Validated `agy` CLI behavior" below.** `--sandbox` is silently
+  neutralized entirely whenever `skip_permissions=True` is also set (`google-antigravity/
+  antigravity-cli#36`, open/unpatched), and on Windows it also blocks routine command execution
+  outright (Python, git) regardless of `skip_permissions`, requiring explicit `unsandboxed(...)`
+  permission grants instead. `--sandbox` should be treated as a best-effort layer, not a
+  guarantee, for any job that isn't fully covered by the curated allow-list
+  (`cadet-install-agy-permissions`, see [CONFIGURATION.md](./CONFIGURATION.md)).
 - No support for multiple CADET server instances sharing one `CADET_STATE_DIR` — undefined,
   documented as an assumption rather than engineered around.
 - No direct CADET↔SALTMDB integration — that connection is entirely `agy`'s and Claude's own
@@ -134,12 +141,44 @@ command in [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md) is built around, not assumptio
 - **Headless permission handling (per vendor changelog, not independently reproduced):** as of
   v1.1.3, a headless (`-p`) run that hits a tool call requiring permission it doesn't have no
   longer hangs or silently auto-approves — it **soft-denies** the tool call and prints a stderr
-  notice naming the allow-rule that would permit it, while the process likely still exits 0. As
-  of v1.1.5, headless runs honor a persisted `settings.json` permission/sandbox/auto-execution
-  policy. Recommendation: give CADET-launched jobs a curated `agy` settings.json allow-list (or
-  accept partial completions with soft-deny notices visible in stderr) rather than defaulting to
-  `--dangerously-skip-permissions`, which would remove that safety net entirely for an unattended
-  job.
+  notice naming the allow-rule that would permit it, while the process exits `0` regardless (see
+  the false-success caveat in "Open questions/risks" below — this is a real correctness gap, not
+  just cosmetic). As of v1.1.5, headless runs honor a persisted `settings.json` permission/
+  sandbox/auto-execution policy.
+- **`--dangerously-skip-permissions` silently defeats `--sandbox` entirely (confirmed,
+  2026-07-26).** `google-antigravity/antigravity-cli#36` (open, unpatched as of this check):
+  when both flags are set, `agy`'s own internal retry-without-sandbox request (`bypassSandbox:
+  true`) gets auto-approved by the same blanket flag that approves everything else, so
+  `--sandbox` provides **zero** real containment whenever `skip_permissions=True`. Reproduced by
+  the reporter: a command run with both flags wrote a file outside the sandboxed workspace.
+  Claude Code does not have this flaw by design. **Do not treat `--sandbox` as independent
+  protection when `skip_permissions=True` — it isn't.**
+- **On Windows, `--sandbox` (AppContainer) blocks routine command execution outright, even
+  without `skip_permissions` (confirmed empirically, 2026-07-26).** AppContainer denies broad
+  `C:\` access by default, which blocks `python.exe` and `git.exe` on this machine's typical
+  install paths. Live-tested: `command(git status)` (an allow-rule already present from the
+  user's own interactive usage) still failed headlessly with `exit_code=1`, stderr `granting
+  access to C:\: Access is denied.` A `python -m pytest ...` invocation hit a **two-gate**
+  sequence instead — first the normal `"command"` permission (soft-denied exactly as described
+  above if missing), then, once granted, the sandboxed execution itself fails and `agy` requests
+  a *second*, distinct `"unsandboxed"` permission to retry outside the sandbox (soft-denied the
+  same way if that's missing too — same empty-stdout/`exit_code=0` false-success symptom). Only
+  granting **both** `command(<target>)` and `unsandboxed(<target>)` produced a real, verified
+  success (actual pytest output, not just `exit_code=0`).
+- **`permissions.allow` rule matching is literal-only, not regex, despite vendor docs (confirmed
+  empirically, 2026-07-26).** `antigravity.google/docs/permissions` claims each whitespace token
+  is an anchored regex (example given: `command(npm run (build.*))`). Tested directly against
+  the installed CLI: neither a token-count-mismatched nor a token-count-matched wildcard rule
+  (`command(python -m pytest (.*))`) matched commands that weren't an exact literal string —
+  every rule that actually worked, including every pre-existing entry in the real settings.json,
+  is a full literal command string. **Design implication:** a curated allow-list must enumerate
+  exact invocation strings CADET is known to issue, not a handful of prefix rules.
+- **Mitigation implemented:** `cadet-install-agy-permissions` (see
+  [CONFIGURATION.md](./CONFIGURATION.md)) additively merges a curated, literal `command(...)` +
+  `unsandboxed(...)` allow-list — scoped to CADET's own documented use cases (read-only git
+  inspection, running the delegated repo's test suite) — into the real global `settings.json`,
+  so ordinary CADET jobs no longer need `skip_permissions=True` at all. It's a manual, one-time,
+  idempotent setup step, not run automatically by the MCP server.
 - **No CLI-queryable subscription/quota status, but a clean, parseable failure when it's hit.**
   There is no `agy` command or flag that reports remaining subscription quota *before* dispatching
   — it's only visible in the interactive TUI, so CADET cannot pre-flight-check it. But when a
@@ -191,7 +230,15 @@ does best-effort detection rather than treating every failure as opaque:
    job. The parsed `Resets in <duration>` format is current as of `agy` v1.1.7 and could change in
    a future version; if it does, detection just silently stops populating `error_kind` rather than
    breaking anything, and the raw stderr text is still visible via `get_task_output`.
-5. **`--continue`/`--conversation` native session resumption is unused, pending verification.**
+5. **`cadet-install-agy-permissions` writes to a single global, shared file.** `agy` has no
+   `--settings <path>` flag and no confirmed per-project permission scoping — the curated
+   allow-list and the user's own interactive `agy` permission history necessarily live in the
+   same `~/.gemini/antigravity-cli/settings.json`. This is an accepted tradeoff (the merge is
+   additive-only and never touches unrelated entries), not something CADET currently isolates.
+   An unexplored future option: override `HOME`/`USERPROFILE` for the spawned `agy` subprocess
+   only, to relocate its whole `~/.gemini` config dir — not attempted, since it would also
+   relocate OAuth credentials and other state, a larger and riskier surface than this fix needed.
+6. **`--continue`/`--conversation` native session resumption is unused, pending verification.**
    `agy` supports resuming a prior conversation by ID, which could give real cross-job continuity
    under one `context_id` instead of relying solely on `agy` cold-reading SALTMDB each time. Not
    adopted in v1 because it's unverified whether `-p` (print) mode exposes the new conversation's
