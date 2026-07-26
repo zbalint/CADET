@@ -239,6 +239,16 @@ invocations against a scratch directory, not vendor docs alone:
   documented for `agy` above, just with a different root cause. **Do not treat
   `workspace-write` as functional for real edits on this platform** until the helper issue is
   fixed upstream (or a working install is confirmed).
+  - **Community workaround tried and reverted (2026-07-26, `openai/codex#23194`).** Copying
+    `codex-windows-sandbox-setup.exe` from the release's `codex-resources\` dir into `bin\`
+    (alongside `codex.exe`) does get past the "program not found" error, but only surfaces a
+    *deeper* failure: `windows sandbox: CreateProcessWithLogonW failed: 2` — and, worse, `codex`'s
+    own final message then falsely claims success (e.g. "Created `hello.txt`") even though the
+    file was never written. That's a strictly worse failure shape (slow hang + false-positive
+    claimed outcome, vs. a fast clean no-op) for no actual gain, and multiple other upstream
+    issues report the same unresolved Windows sandbox problem — so the workaround was reverted.
+    **Do not reapply this workaround without confirming upstream has actually fixed the deeper
+    `CreateProcessWithLogonW` issue first.**
 - **`-s read-only` runs cleanly** (vendor default) — confirmed via a real invocation that doesn't
   attempt any writes. Safe, but by definition cannot apply edits.
 - **`--dangerously-bypass-approvals-and-sandbox` is the only flag confirmed to actually apply
