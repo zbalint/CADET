@@ -1,7 +1,9 @@
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from cadet import config
 
@@ -15,8 +17,13 @@ _ENV_VARS = [
     "CADET_AGY_MODEL",
     "CADET_AGY_EFFORT",
     "CADET_AGY_SANDBOX",
-    "CADET_AGY_PATH",
     "CADET_AGY_SETTINGS_PATH",
+    "CADET_AGY_DOCKER_IMAGE",
+    "CADET_AGY_GEMINI_VOLUME",
+    "CADET_AGY_CONTAINER_MEMORY",
+    "CADET_AGY_CONTAINER_CPUS",
+    "CADET_AGY_CONTAINER_PIDS_LIMIT",
+    "CADET_AGY_STOP_GRACE_S",
     "CADET_CODEX_PATH",
     "CADET_CODEX_MODEL",
     "CADET_CODEX_EFFORT",
@@ -108,22 +115,58 @@ class TestNumericBoolGetters(ConfigTestCase):
             self.assertTrue(config.is_agy_sandbox_enabled(), msg=f"expected truthy for {val!r}")
 
 
-class TestResolveAgyPath(ConfigTestCase):
-    def test_missing_raises(self):
-        with self.assertRaises(RuntimeError):
-            config.resolve_agy_path()
+class TestAgyDockerGetters(ConfigTestCase):
+    def test_defaults(self):
+        self.assertEqual(config.get_agy_docker_image(), "cadet-agy:latest")
+        self.assertEqual(config.get_agy_gemini_volume(), "cadet-agy-gemini")
+        self.assertEqual(config.get_agy_container_memory(), "2g")
+        self.assertEqual(config.get_agy_container_cpus(), "2")
+        self.assertEqual(config.get_agy_container_pids_limit(), 512)
+        self.assertEqual(config.get_agy_stop_grace_s(), 10)
 
-    def test_nonexistent_path_raises(self):
-        os.environ["CADET_AGY_PATH"] = os.path.join(self.temp_dir, "does_not_exist.exe")
-        with self.assertRaises(RuntimeError):
-            config.resolve_agy_path()
+    def test_overrides(self):
+        os.environ["CADET_AGY_DOCKER_IMAGE"] = "custom-agy:v2"
+        os.environ["CADET_AGY_GEMINI_VOLUME"] = "custom-vol"
+        os.environ["CADET_AGY_CONTAINER_MEMORY"] = "4g"
+        os.environ["CADET_AGY_CONTAINER_CPUS"] = "4"
+        os.environ["CADET_AGY_CONTAINER_PIDS_LIMIT"] = "1024"
+        os.environ["CADET_AGY_STOP_GRACE_S"] = "30"
 
-    def test_valid_path_resolves(self):
-        fake_agy = os.path.join(self.temp_dir, "agy.exe")
-        with open(fake_agy, "w") as f:
-            f.write("")
-        os.environ["CADET_AGY_PATH"] = fake_agy
-        self.assertEqual(config.resolve_agy_path(), fake_agy)
+        self.assertEqual(config.get_agy_docker_image(), "custom-agy:v2")
+        self.assertEqual(config.get_agy_gemini_volume(), "custom-vol")
+        self.assertEqual(config.get_agy_container_memory(), "4g")
+        self.assertEqual(config.get_agy_container_cpus(), "4")
+        self.assertEqual(config.get_agy_container_pids_limit(), 1024)
+        self.assertEqual(config.get_agy_stop_grace_s(), 30)
+
+
+class TestResolveAgyDockerImage(ConfigTestCase):
+    def test_image_found_resolves(self):
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as mock_run:
+            self.assertEqual(config.resolve_agy_docker_image(), "cadet-agy:latest")
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args[0][0], ["docker", "image", "inspect", "cadet-agy:latest"])
+
+    def test_image_not_found_raises(self):
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr="no such image")):
+            with self.assertRaises(RuntimeError):
+                config.resolve_agy_docker_image()
+
+    def test_docker_cli_missing_raises(self):
+        with patch("cadet.config.subprocess.run", side_effect=FileNotFoundError()):
+            with self.assertRaises(RuntimeError):
+                config.resolve_agy_docker_image()
+
+    def test_docker_daemon_unreachable_raises(self):
+        with patch("cadet.config.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=10)):
+            with self.assertRaises(RuntimeError):
+                config.resolve_agy_docker_image()
+
+    def test_respects_image_env_override(self):
+        os.environ["CADET_AGY_DOCKER_IMAGE"] = "custom-agy:v2"
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as mock_run:
+            self.assertEqual(config.resolve_agy_docker_image(), "custom-agy:v2")
+        self.assertEqual(mock_run.call_args[0][0], ["docker", "image", "inspect", "custom-agy:v2"])
 
 
 class TestAgySettingsPath(ConfigTestCase):
@@ -140,12 +183,9 @@ class TestAgySettingsPath(ConfigTestCase):
 
 
 class TestProviderGenericResolution(ConfigTestCase):
-    def test_resolve_provider_path_agy_delegates_to_resolve_agy_path(self):
-        fake_agy = os.path.join(self.temp_dir, "agy.exe")
-        with open(fake_agy, "w") as f:
-            f.write("")
-        os.environ["CADET_AGY_PATH"] = fake_agy
-        self.assertEqual(config.resolve_provider_path("agy"), fake_agy)
+    def test_resolve_provider_path_agy_delegates_to_resolve_agy_docker_image(self):
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
+            self.assertEqual(config.resolve_provider_path("agy"), "cadet-agy:latest")
 
     def test_resolve_provider_path_other_provider_uses_prefixed_env_var(self):
         fake_codex = os.path.join(self.temp_dir, "codex.exe")

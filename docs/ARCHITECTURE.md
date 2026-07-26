@@ -64,6 +64,65 @@ both and invokes `node.exe`/`npm-loader.js` directly — and shares `cursor`'s `
 read-only lever, but diverges on the middle ground: `sandbox=False, skip_permissions=False` is not
 broken for `copilot` — it just behaves the same as `skip_permissions=True`.
 
+## Containerized `agy` execution
+
+Every provider's own vendor-supplied "sandbox" mechanism turned out to be broken or trivially
+bypassable on Windows (see each provider's "Validated ... CLI behavior" section). Rather than
+continuing to chase per-vendor Windows bugs, `agy` (CADET's default/most-used provider) was moved
+to run inside a local Docker container, whose filesystem/process isolation doesn't depend on any
+vendor's cooperation. This replaces `agy`'s native Windows subprocess execution entirely — there is
+no dual native/container mode for `agy`. `codex`/`cursor`/`copilot` are untouched by this change.
+
+- **Image**: `docker/agy/Dockerfile` — a minimal `debian:bookworm-slim` base plus `git` and
+  `python3`/`pip3` (matching what the curated allow-list actually runs — deliberately not
+  `node`/`npm`/`build-essential`, added only if a real delegated task needs them). Extracts the
+  official Linux x64 release (`agy_cli_linux_x64.tar.gz` from `google-antigravity/antigravity-cli`
+  — the tarball contains a single file named `antigravity`, renamed to `agy` at build time so the
+  rest of CADET's argv construction doesn't need a platform branch). Built/tagged locally as
+  `cadet-agy:latest` (`docker build -t cadet-agy:latest docker/agy/`) — no registry, single machine
+  only.
+- **Auth**: a dedicated Docker named volume (`cadet-agy-gemini`, see `CADET_AGY_GEMINI_VOLUME` in
+  [CONFIGURATION.md](./CONFIGURATION.md)) holds the containerized `agy`'s own identity, deliberately
+  isolated from the host's interactive `~/.gemini` (its large volatile dirs — conversation history,
+  cache, crashes — are never shared with the container). **Critical finding: the Linux build of
+  `agy` uses an entirely different credential file than Windows** — it looks for
+  `~/.gemini/antigravity-cli/antigravity-oauth-token` (confirmed via `strace` tracing its actual
+  `openat()` calls), not `oauth_creds.json` (the Windows file, confirmed separately to still work
+  fine natively on Windows). No cross-platform credential copy is possible — a one-time interactive
+  OAuth login (`docker run --rm -it -v cadet-agy-gemini:/root/.gemini cadet-agy:latest agy -p "..."
+  --print-timeout 120s`, pasting the resulting authorization code back into the terminal) must be
+  done once against this volume before any headless job can authenticate. `src/cadet/process/
+  agy_docker_setup.py` (`cadet-setup-agy-docker` console script) additionally seeds
+  `oauth_creds.json`/`google_accounts.json`/`installation_id`/top-level `settings.json`/
+  `antigravity-cli/settings.json` from the host — useful for the curated permission allow-list
+  (`antigravity-cli/settings.json`) and as a starting point, but **does not by itself satisfy
+  auth** — the interactive login step above is still required.
+- **Invocation**: `src/cadet/process/launcher.py`'s `build_argv` wraps the same `agy` flags CADET
+  always issued (`-p`, `--add-dir`, `--print-timeout`, `--mode accept-edits`, `--sandbox`, `--model`,
+  `--effort`, `--dangerously-skip-permissions`) inside `docker run --rm --name <container>`, with
+  `-v <cwd>:/workspace -w /workspace` (the target repo bind-mounted — `--add-dir` targets the
+  container-side `/workspace` path, never the host `cwd`, to avoid reproducing the exact
+  "silent write to the wrong place" bug documented in "Validated `agy` CLI behavior" below),
+  `-v cadet-agy-gemini:/root/.gemini`, resource limits (`--memory`, `--cpus`, `--pids-limit`,
+  defaults in [CONFIGURATION.md](./CONFIGURATION.md)), and hardening flags (`--cap-drop=ALL`,
+  `--security-opt=no-new-privileges`). No `--network none` — `agy` needs outbound HTTPS to
+  Gemini's API, so Docker's default bridge network is left alone. The container name is
+  deterministic from `job_id` (`cadet-agy-<job_id>`), letting the stop/cancel/reconcile paths target
+  it without any extra state.
+- **Stop/cancel/reconcile**: the recorded `pid` for an `agy` job is the `docker run` **client's**
+  PID, not the container's own lifetime — the container is a daemon-managed object independent of
+  that client process. `src/cadet/process/treekill.py`'s `stop_container` (`docker stop --timeout
+  <grace_s> <name>`) is the real stop; `kill_process_tree` on the client PID runs afterward as a
+  cheap, idempotent defensive fallback. All three of `dispatcher.py`'s kill-call-sites (lost
+  `mark_running` race, timeout, `cancel`) and `reconcile.py`'s startup-reconciliation loop are
+  provider-aware: `agy` always calls `stop_container` (unconditionally for reconcile — no PID
+  liveness pre-check needed, since stopping an already-gone container is itself a tolerated no-op),
+  while `codex`/`cursor`/`copilot` are completely unchanged, still going through the original
+  PID-based `kill_process_tree` path.
+- **Bootstrap**: `config.resolve_agy_docker_image()` replaces the old `resolve_agy_path()` — the
+  fail-fast check at server startup is now "is Docker reachable and is `cadet-agy:latest` built"
+  (`docker image inspect`) rather than "does a host `agy.exe` exist." `CADET_AGY_PATH` is retired.
+
 ## The `context_id` thread
 
 `context_id` is the single correlation key connecting all three systems:
@@ -89,17 +148,14 @@ and control over jobs CADET already runs, not a second way to submit work.
 
 ## Non-goals
 
-- No sandboxing mechanism built *by* CADET — but CADET does enable `agy`'s own native
-  `--sandbox` flag by default for delegated runs (see [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md)),
-  since an unattended, unsupervised job is exactly the scenario that flag exists for. CADET
-  doesn't invent containment; it just turns on the containment `agy` already ships. **This is
-  weaker than it sounds — see "Validated `agy` CLI behavior" below.** `--sandbox` is silently
-  neutralized entirely whenever `skip_permissions=True` is also set (`google-antigravity/
-  antigravity-cli#36`, open/unpatched), and on Windows it also blocks routine command execution
-  outright (Python, git) regardless of `skip_permissions`, requiring explicit `unsandboxed(...)`
-  permission grants instead. `--sandbox` should be treated as a best-effort layer, not a
-  guarantee, for any job that isn't fully covered by the curated allow-list
-  (`cadet-install-agy-permissions`, see [CONFIGURATION.md](./CONFIGURATION.md)).
+- **No sandboxing mechanism built *by* CADET for `codex`/`cursor`/`copilot`** — for these three
+  providers, CADET still only enables the vendor's own native sandbox flag where one exists (see
+  their respective "Validated ... CLI behavior" sections below), and every one of those flags has
+  been found broken or trivially bypassable on Windows. `agy` is the one exception: as of
+  "Containerized `agy` execution" below, CADET now provides its own real containment (a Docker
+  container) for `agy` specifically, superseding reliance on `agy`'s own (also broken-on-Windows)
+  `--sandbox`/AppContainer mechanism. Extending containerized execution to the other 3 providers is
+  a plausible future phase, not yet done.
 - No support for multiple CADET server instances sharing one `CADET_STATE_DIR` — undefined,
   documented as an assumption rather than engineered around.
 - No direct CADET↔SALTMDB integration — that connection is entirely `agy`'s and Claude's own
@@ -231,6 +287,45 @@ command in [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md) is built around, not assumptio
   Claude models selectable via `--model` — so a `quota_exhausted` failure is scoped to whichever
   pool the job's requested `model` draws from, not global. See "Quota exhaustion detection" below
   for how CADET surfaces this.
+
+## Validated `agy` container behavior
+
+Confirmed empirically against `cadet-agy:latest` (Docker Desktop, WSL2 backend), 2026-07-26 — real
+container invocations, not assumptions:
+
+- **`agy --version` inside the container reports `1.1.7`**, matching the host's native Windows
+  install exactly — same release, different platform build.
+- **Network egress works from the default bridge network**: `curl` to `oauth2.googleapis.com` and
+  `accounts.google.com` from inside the container both returned real HTTP responses (404/302, not
+  connection failures), confirming outbound HTTPS to Google's endpoints isn't blocked by Docker
+  Desktop's default networking.
+- **Auth is genuinely platform-specific — no cross-platform credential copy works.** Tracing
+  `agy`'s actual file access with `strace` showed it never once opens `oauth_creds.json` (the file
+  copied from the host); it opens `~/.gemini/antigravity-cli/antigravity-oauth-token`, which didn't
+  exist anywhere on the host either (the user had simply never run `agy` on Linux before). Confirmed
+  the copied Windows credential *is* valid by running `agy` natively on the host in the same
+  session — it authenticated fine and hit a quota error, not an auth prompt. A one-time interactive
+  OAuth login inside a container attached to the same volume was required and completed
+  successfully (confirmed via the resulting quota-exhaustion error replacing the earlier
+  auth-timeout error — reaching a quota check requires being authenticated).
+- **`docker stop --timeout <n> <name>` cleanly and quickly stops a running container**: tested
+  against a container trapping `SIGTERM`, stopped in ~1.3s against a 5s grace period, clean exit 0.
+  **Note: `docker stop --time` is deprecated on current Docker CLI versions — use `--timeout`.**
+- **Resource/hardening flags (`--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--pids-limit`)
+  don't prevent the container from starting or running ordinary processes** — confirmed via the
+  stop-mechanism test above, which ran successfully under all of them.
+- **Still unverified, pending the account's quota reset (~67h as of this check) — do not assume,
+  confirm before relying on:**
+  - Whether `agy`'s own `--sandbox` flag behaves differently (or at all) on Linux vs. Windows
+    AppContainer, and whether the curated `command()`/`unsandboxed()` allow-list
+    (`cadet-install-agy-permissions`) becomes unnecessary inside the container. Could not be
+    observed — this requires a real model call past the auth/quota gate.
+  - Whether `--add-dir /workspace` correctness (writing to the bind-mounted host directory, not
+    some container-internal path) holds the same way it does on Windows.
+  - Whether the outer container's `--cap-drop=ALL`/`--security-opt=no-new-privileges` conflicts
+    with anything `agy`'s own sandbox implementation needs internally.
+  - Whether the default resource limits (`2g` memory / `2` cpus / `512` pids) are adequate for a
+    realistic job (e.g. running a delegated repo's own test suite).
 
 ## Validated `codex` CLI behavior
 
@@ -513,3 +608,15 @@ than CADET building a new notification channel of its own.
    entirely (`--force`), and there is no confirmed way to allow edits while still gating other
    risky actions without a TTY present. Revisit if a future `cursor-agent` version adds a
    headless-safe approval channel.
+9. **The recorded `pid` for a containerized `agy` job is the `docker run` client's PID, not the
+   container's own lifetime.** This is handled correctly today (all 3 `dispatcher.py` kill-sites
+   plus `reconcile.py`'s startup loop route `agy` through `stop_container`/`docker stop`, not a bare
+   PID tree-kill — see "Containerized `agy` execution" above) but is a sharp edge for anyone
+   extending this pattern to another provider: a naive PID-based kill/liveness-check silently does
+   nothing useful against a container.
+10. **Whether `agy_permissions.py`'s curated Windows-AppContainer allow-list is still needed inside
+    the container is unverified.** See "Validated `agy` container behavior" above — this and the
+    other container-specific open questions there (sandbox-vs-hardening-flag interaction,
+    `--add-dir` correctness, resource-limit adequacy) were blocked by the account's quota reset
+    during the initial container rollout and must be confirmed with a real job before being relied
+    upon, not assumed from the Windows findings.

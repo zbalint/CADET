@@ -37,7 +37,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     # "agy" is required/fail-fast at server bootstrap (see __main__.py); other
     # providers are optional here — an unconfigured one just isn't in the dict,
     # and delegate_task rejects requests for it per-call with a clean error.
-    executable_paths = {"agy": config.resolve_agy_path()}
+    executable_paths = {"agy": config.resolve_agy_docker_image()}
     for provider_name in registry.names():
         if provider_name == "agy":
             continue

@@ -119,11 +119,45 @@ class TestRunJobLifecycle(DispatcherTestCase):
         proc.wait = fake_wait
 
         with patch("cadet.jobs.dispatcher.spawn_agy", AsyncMock(return_value=proc)), \
-             patch("cadet.jobs.dispatcher.kill_process_tree") as mock_kill:
+             patch("cadet.jobs.dispatcher.stop_agy_container") as mock_stop:
             await self.dispatcher._semaphore.acquire()
             await self.dispatcher.run_job("job-1")
 
-        mock_kill.assert_called_once_with(222)
+        # agy's timeout path stops the container (docker stop), not a bare
+        # PID tree-kill — the recorded pid is the docker-run client's, not
+        # the container's own lifetime. See launcher.stop_agy.
+        mock_stop.assert_called_once_with("job-1", 222)
+        job = job_store.get_job("job-1", db_path=self.db_path)
+        self.assertEqual(job["status"], "timeout")
+
+    async def test_timeout_for_non_agy_provider_still_uses_kill_process_tree(self):
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "C:\\tools\\agy.exe", "codex": "C:\\tools\\codex.exe"},
+            max_concurrent=2, db_path=self.db_path,
+        )
+        self._create_pending_job(provider="codex", timeout_s=0.05)
+        wait_calls = {"n": 0}
+
+        async def fake_wait():
+            wait_calls["n"] += 1
+            if wait_calls["n"] == 1:
+                await asyncio.sleep(10)
+            return -9
+
+        proc = MagicMock()
+        proc.pid = 223
+        proc.wait = fake_wait
+
+        with patch("cadet.jobs.dispatcher.spawn_codex", AsyncMock(return_value=proc)), \
+             patch("cadet.jobs.dispatcher.kill_process_tree") as mock_kill, \
+             patch("cadet.jobs.dispatcher.stop_agy_container") as mock_stop:
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-1")
+
+        # Locks in the "only agy's stop path changed" guarantee: non-agy
+        # providers are untouched by the containerization work.
+        mock_kill.assert_called_once_with(223)
+        mock_stop.assert_not_called()
         job = job_store.get_job("job-1", db_path=self.db_path)
         self.assertEqual(job["status"], "timeout")
 
@@ -132,11 +166,11 @@ class TestRunJobLifecycle(DispatcherTestCase):
         proc = _make_proc(pid=333)
         with patch("cadet.jobs.dispatcher.spawn_agy", AsyncMock(return_value=proc)), \
              patch("cadet.jobs.dispatcher.job_store.mark_running", return_value=False), \
-             patch("cadet.jobs.dispatcher.kill_process_tree") as mock_kill:
+             patch("cadet.jobs.dispatcher.stop_agy_container") as mock_stop:
             await self.dispatcher._semaphore.acquire()
             await self.dispatcher.run_job("job-1")
 
-        mock_kill.assert_called_once_with(333)
+        mock_stop.assert_called_once_with("job-1", 333)
         job = job_store.get_job("job-1", db_path=self.db_path)
         # Row was never actually flipped to running (mocked to fail), stays pending —
         # proves run_job didn't blindly finalize over a row it lost the race on.
@@ -229,16 +263,31 @@ class TestCancel(DispatcherTestCase):
         self._create_pending_job()
         job_store.mark_running("job-1", pid=555, started_at="t1", db_path=self.db_path)
 
-        with patch("cadet.jobs.dispatcher.kill_process_tree") as mock_kill:
+        with patch("cadet.jobs.dispatcher.stop_agy_container") as mock_stop:
             result = await self.dispatcher.cancel("job-1")
 
         self.assertEqual(result, {"previous_status": "running", "status": "cancelled", "already_terminal": False})
         self.assertIn("job-1", self.dispatcher._cancel_flags)
-        mock_kill.assert_called_once_with(555)
+        mock_stop.assert_called_once_with("job-1", 555)
         # The DB row itself is left 'running' — run_job's own completion path
         # (the sole writer for a running job) is what finalizes it, per the
         # single-writer design documented in dispatcher.cancel's docstring.
         self.assertEqual(job_store.get_job("job-1", db_path=self.db_path)["status"], "running")
+
+    async def test_cancel_running_job_for_non_agy_provider_still_uses_kill_process_tree(self):
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "C:\\tools\\agy.exe", "codex": "C:\\tools\\codex.exe"},
+            max_concurrent=2, db_path=self.db_path,
+        )
+        self._create_pending_job(provider="codex")
+        job_store.mark_running("job-1", pid=556, started_at="t1", db_path=self.db_path)
+
+        with patch("cadet.jobs.dispatcher.kill_process_tree") as mock_kill, \
+             patch("cadet.jobs.dispatcher.stop_agy_container") as mock_stop:
+            await self.dispatcher.cancel("job-1")
+
+        mock_kill.assert_called_once_with(556)
+        mock_stop.assert_not_called()
 
     async def test_cancel_flag_causes_run_job_to_finalize_as_cancelled(self):
         self._create_pending_job(timeout_s=5)

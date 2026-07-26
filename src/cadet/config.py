@@ -1,4 +1,5 @@
 import os
+import subprocess
 
 
 def get_state_dir() -> str:
@@ -64,18 +65,52 @@ def get_agy_settings_path() -> str:
     )
 
 
-def resolve_agy_path() -> str:
-    """Resolve and validate CADET_AGY_PATH. Fails fast (raises) rather than deferring
-    the error to the first delegate_task call, since an MCP-launched process often
-    doesn't inherit the full interactive-shell PATH."""
-    path = os.environ.get("CADET_AGY_PATH")
-    if not path:
-        raise RuntimeError(
-            "CADET_AGY_PATH is not set. It must be the absolute path to the agy executable."
+def get_agy_docker_image() -> str:
+    return os.environ.get("CADET_AGY_DOCKER_IMAGE", "cadet-agy:latest")
+
+
+def get_agy_gemini_volume() -> str:
+    return os.environ.get("CADET_AGY_GEMINI_VOLUME", "cadet-agy-gemini")
+
+
+def get_agy_container_memory() -> str:
+    return os.environ.get("CADET_AGY_CONTAINER_MEMORY", "2g")
+
+
+def get_agy_container_cpus() -> str:
+    return os.environ.get("CADET_AGY_CONTAINER_CPUS", "2")
+
+
+def get_agy_container_pids_limit() -> int:
+    return int(os.environ.get("CADET_AGY_CONTAINER_PIDS_LIMIT", "512"))
+
+
+def get_agy_stop_grace_s() -> int:
+    return int(os.environ.get("CADET_AGY_STOP_GRACE_S", "10"))
+
+
+def resolve_agy_docker_image() -> str:
+    """Resolve and validate the agy provider's containerized execution target.
+    Replaces the old resolve_agy_path() (host CADET_AGY_PATH binary lookup) —
+    agy now runs exclusively inside a Docker container (see
+    docs/ARCHITECTURE.md's "Containerized agy execution" section), so the
+    equivalent fail-fast check is "is Docker reachable and is the image
+    built" rather than "does this exe file exist". Fails fast (raises) at
+    server bootstrap rather than deferring to the first delegate_task call."""
+    image = get_agy_docker_image()
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", image], capture_output=True, text=True, timeout=10,
         )
-    if not os.path.isfile(path):
-        raise RuntimeError(f"CADET_AGY_PATH does not point to an existing file: {path}")
-    return path
+    except FileNotFoundError:
+        raise RuntimeError("Docker CLI not found on PATH — is Docker Desktop installed?")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Docker CLI timed out — is Docker Desktop running?")
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Docker image {image!r} not found locally. Build it: docker build -t {image} docker/agy/"
+        )
+    return image
 
 
 # --- Provider-generic resolution -------------------------------------------
@@ -89,11 +124,12 @@ def _env_prefix(provider: str) -> str:
 
 
 def resolve_provider_path(provider: str) -> str:
-    """Like resolve_agy_path, but for any provider name. Always required —
-    used by delegate_task's per-call validation, which turns a RuntimeError
-    into a clean {"error": ...} response rather than letting it propagate."""
+    """Like resolve_agy_docker_image, but for any provider name. Always
+    required — used by delegate_task's per-call validation, which turns a
+    RuntimeError into a clean {"error": ...} response rather than letting it
+    propagate."""
     if provider == "agy":
-        return resolve_agy_path()
+        return resolve_agy_docker_image()
     env_var = f"{_env_prefix(provider)}_PATH"
     path = os.environ.get(env_var)
     if not path:

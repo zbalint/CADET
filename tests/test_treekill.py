@@ -57,5 +57,35 @@ class TestKillProcessTreePosix(unittest.TestCase):
         treekill.kill_process_tree(9999)  # should not raise
 
 
+class TestStopContainer(unittest.TestCase):
+    @patch("cadet.process.treekill.subprocess.run")
+    def test_calls_docker_stop_with_correct_args(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        treekill.stop_container("cadet-agy-job-1", grace_s=10)
+        mock_run.assert_called_once_with(
+            ["docker", "stop", "--timeout", "10", "cadet-agy-job-1"],
+            capture_output=True, text=True, timeout=25,
+        )
+
+    @patch("cadet.process.treekill.subprocess.run")
+    def test_default_grace_period(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        treekill.stop_container("cadet-agy-job-1")
+        mock_run.assert_called_once_with(
+            ["docker", "stop", "--timeout", "10", "cadet-agy-job-1"],
+            capture_output=True, text=True, timeout=25,
+        )
+
+    @patch("cadet.process.treekill.subprocess.run")
+    def test_already_gone_container_does_not_raise(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=1, stderr="Error: No such container: cadet-agy-job-1")
+        treekill.stop_container("cadet-agy-job-1")  # best-effort — never raises
+
+    @patch("cadet.process.treekill.subprocess.run")
+    def test_timeout_expired_does_not_raise(self, mock_run):
+        mock_run.side_effect = subprocess.TimeoutExpired(cmd=["docker", "stop"], timeout=25)
+        treekill.stop_container("cadet-agy-job-1")  # best-effort — never raises
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,8 +4,10 @@ import os
 import platform
 import subprocess
 
+from cadet import config
 from cadet.db import job_store
-from cadet.process.treekill import kill_process_tree
+from cadet.process.launcher import container_name_for_job
+from cadet.process.treekill import kill_process_tree, stop_container
 
 
 def _now_iso() -> str:
@@ -52,8 +54,20 @@ async def reconcile_on_startup(dispatcher, db_path=None) -> dict:
 
     running_jobs = job_store.list_jobs(status_filter="running", limit=10_000, db_path=db_path)
     for job in running_jobs:
+        provider_name = job["provider"] or "agy"
         pid = job["pid"]
-        if pid is None:
+        if provider_name == "agy":
+            # The recorded pid is the docker-run client's PID from the
+            # previous CADET instance, not the container's own lifetime -- a
+            # dead client PID does NOT mean the container (a daemon-managed
+            # object independent of that client) is dead. No liveness
+            # pre-check needed: docker stop on an already-gone container is
+            # itself a tolerated no-op, unlike the PID check-then-kill below.
+            await asyncio.to_thread(
+                stop_container, container_name_for_job(job["job_id"]), config.get_agy_stop_grace_s()
+            )
+            error_message = "agy container force-stopped at restart (previous CADET instance's lifetime unknown)"
+        elif pid is None:
             error_message = "no pid recorded at restart"
         elif _is_pid_alive(pid):
             await asyncio.to_thread(kill_process_tree, pid)

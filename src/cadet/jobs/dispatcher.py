@@ -7,6 +7,7 @@ from cadet.process.providers.agy import spawn as spawn_agy, parse_error as parse
 from cadet.process.providers.codex import spawn as spawn_codex, parse_error as parse_error_codex
 from cadet.process.providers.cursor import spawn as spawn_cursor, parse_error as parse_error_cursor
 from cadet.process.providers.copilot import spawn as spawn_copilot, parse_error as parse_error_copilot
+from cadet.process.launcher import stop_agy as stop_agy_container
 from cadet.process.treekill import kill_process_tree
 
 # NOTE: dispatch dicts referencing spawn_agy/parse_error_agy are built fresh
@@ -73,6 +74,11 @@ class Dispatcher:
             provider_name = job["provider"] or "agy"
             spawn_fns = {"agy": spawn_agy, "codex": spawn_codex, "cursor": spawn_cursor, "copilot": spawn_copilot}
             spawn_fn = spawn_fns[provider_name]
+            # agy's spawn() needs job_id to derive its deterministic container
+            # name (see launcher.container_name_for_job); the other 3
+            # providers' spawn() signatures are untouched, so job_id is only
+            # ever passed for agy.
+            extra_kwargs = {"job_id": job_id} if provider_name == "agy" else {}
 
             proc = await spawn_fn(
                 self.executable_paths[provider_name], prompt_text, job["cwd"], job["timeout_s"],
@@ -80,7 +86,22 @@ class Dispatcher:
                 model=job["model"], effort=job["effort"],
                 skip_permissions=bool(job["skip_permissions"]),
                 sandbox=config.is_provider_sandbox_enabled(provider_name),
+                **extra_kwargs,
             )
+
+            # Provider-aware stop: for agy, the recorded pid is the docker-run
+            # client's PID, not the container's own lifetime, so tree-killing
+            # it alone does not reliably stop the container (see
+            # launcher.stop_agy / treekill.stop_container). Built fresh here
+            # (not module scope) for the same reason spawn_fns/parse_error_fns
+            # are — so unittest.mock.patch on the module-level names is honored.
+            stop_fns = {
+                "agy": lambda pid, jid: stop_agy_container(jid, pid),
+                "codex": lambda pid, jid: kill_process_tree(pid),
+                "cursor": lambda pid, jid: kill_process_tree(pid),
+                "copilot": lambda pid, jid: kill_process_tree(pid),
+            }
+            stop_fn = stop_fns[provider_name]
 
             won = job_store.mark_running(job_id, proc.pid, _now_iso(), db_path=self.db_path)
             if not won:
@@ -88,14 +109,14 @@ class Dispatcher:
                 # check above and this write. The row is already terminal
                 # ('cancelled'); the process is real, so kill it and stop —
                 # no terminal write of our own is needed or would succeed.
-                await asyncio.to_thread(kill_process_tree, proc.pid)
+                await asyncio.to_thread(stop_fn, proc.pid, job_id)
                 return
 
             timed_out = False
             try:
                 exit_code = await asyncio.wait_for(proc.wait(), timeout=job["timeout_s"])
             except asyncio.TimeoutError:
-                await asyncio.to_thread(kill_process_tree, proc.pid)
+                await asyncio.to_thread(stop_fn, proc.pid, job_id)
                 exit_code = await proc.wait()
                 timed_out = True
 
@@ -167,7 +188,11 @@ class Dispatcher:
             # (the sole writer for a running job) checks it before finalizing.
             self._cancel_flags.add(job_id)
             if job.get("pid"):
-                await asyncio.to_thread(kill_process_tree, job["pid"])
+                provider_name = job["provider"] or "agy"
+                if provider_name == "agy":
+                    await asyncio.to_thread(stop_agy_container, job_id, job["pid"])
+                else:
+                    await asyncio.to_thread(kill_process_tree, job["pid"])
             return {"previous_status": "running", "status": "cancelled", "already_terminal": False}
 
         # Finished between our checks.

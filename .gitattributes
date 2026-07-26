@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts must keep LF endings on checkout regardless of core.autocrlf --
+# a CRLF shebang line breaks `#!/bin/sh` inside a Linux Docker build context.
+*.sh text eol=lf

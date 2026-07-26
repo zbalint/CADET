@@ -1,18 +1,27 @@
 import asyncio
 import subprocess
-import sys
+
+from cadet import config
 
 
-def build_argv(
-    agy_path: str, prompt_text: str, cwd: str, timeout_s: int,
+def container_name_for_job(job_id: str) -> str:
+    """job_id is always "job-" + uuid4().hex[:12] (see mcp/tools.py), which only
+    ever contains [a-z0-9-] -- a valid Docker container name (^[a-zA-Z0-9][a-zA-Z0-9_.-]+$)."""
+    return f"cadet-agy-{job_id}"
+
+
+def _inner_agy_argv(
+    prompt_text: str, timeout_s: int,
     model=None, effort=None, skip_permissions=False, sandbox=True,
 ) -> list[str]:
-    """Pure argv construction, kept separate from the actual subprocess call so
-    it's unit-testable without touching asyncio. Order matches JOB_LIFECYCLE.md's
-    "Process management" section exactly."""
+    """Pure argv construction for the agy CLI itself, run inside the container.
+    Identical flag logic to CADET's pre-container agy invocation, except
+    --add-dir always targets the container-side bind-mount path "/workspace",
+    never the host cwd -- getting this wrong reproduces agy's own documented
+    "silent write to the wrong place, false success" bug class."""
     argv = [
-        agy_path, "-p", prompt_text,
-        "--add-dir", cwd,
+        "agy", "-p", prompt_text,
+        "--add-dir", "/workspace",
         "--print-timeout", f"{timeout_s}s",
         "--mode", "accept-edits",
     ]
@@ -27,18 +36,59 @@ def build_argv(
     return argv
 
 
+def build_argv(
+    image: str, prompt_text: str, cwd: str, timeout_s: int, job_id: str,
+    model=None, effort=None, skip_permissions=False, sandbox=True,
+) -> list[str]:
+    """Wraps the inner agy invocation in `docker run`. --rm so a finished
+    container never lingers; --name is deterministic from job_id so
+    stop_agy (treekill.stop_container) can target it later without needing
+    any extra state threaded through job_store. No --network flag: agy needs
+    outbound HTTPS to Gemini's API, so Docker's default bridge network is
+    left alone (never --network none)."""
+    name = container_name_for_job(job_id)
+    argv = [
+        "docker", "run", "--rm", "--name", name,
+        "-v", f"{cwd}:/workspace", "-w", "/workspace",
+        "-v", f"{config.get_agy_gemini_volume()}:/root/.gemini",
+        "--memory", config.get_agy_container_memory(),
+        "--cpus", config.get_agy_container_cpus(),
+        "--pids-limit", str(config.get_agy_container_pids_limit()),
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        image,
+    ]
+    argv += _inner_agy_argv(prompt_text, timeout_s, model, effort, skip_permissions, sandbox)
+    return argv
+
+
 async def spawn_agy(
-    agy_path: str, prompt_text: str, cwd: str, timeout_s: int, stdout_fh, stderr_fh,
+    image: str, prompt_text: str, cwd: str, timeout_s: int, stdout_fh, stderr_fh, job_id: str,
     model=None, effort=None, skip_permissions=False, sandbox=True,
 ):
-    """Spawn `agy` as a background subprocess. No shell=True — argv list avoids
-    shell quoting/escaping issues on the rendered prompt entirely. Uses
-    CREATE_NEW_PROCESS_GROUP on Windows (start_new_session on POSIX) so the whole
-    process tree can be killed later via treekill.kill_process_tree."""
-    argv = build_argv(agy_path, prompt_text, cwd, timeout_s, model, effort, skip_permissions, sandbox)
-    spawn_kwargs = dict(cwd=cwd, stdout=stdout_fh, stderr=stderr_fh)
-    if sys.platform == "win32":
-        spawn_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        spawn_kwargs["start_new_session"] = True
-    return await asyncio.create_subprocess_exec(*argv, **spawn_kwargs)
+    """Spawn the `docker run` client as a foreground subprocess -- its stdout/
+    stderr are the containerized agy's own stdout/stderr by default (no -d),
+    so log capture is unchanged from the pre-container behavior. Its `.pid`
+    is the docker-run client's PID (a real Windows PID), and `.wait()`
+    resolves when the container exits, satisfying dispatcher.py's existing
+    proc.pid/.wait() contract without any structural change there.
+
+    stdin=DEVNULL fixes a latent gap vs. the other 3 providers (which already
+    set this) -- agy's native (pre-container) spawn never set it."""
+    argv = build_argv(image, prompt_text, cwd, timeout_s, job_id, model, effort, skip_permissions, sandbox)
+    return await asyncio.create_subprocess_exec(
+        *argv, stdout=stdout_fh, stderr=stderr_fh, stdin=subprocess.DEVNULL,
+    )
+
+
+def stop_agy(job_id: str, pid: int) -> None:
+    """Provider-specific stop for agy: the recorded pid is the docker-run
+    client's PID, not the container's -- the container is a daemon-managed
+    object with its own lifetime, independent of that client process still
+    being alive. stop_container is the real stop; kill_process_tree(pid)
+    afterward is a cheap, idempotent defensive fallback on the client
+    process itself (e.g. if the docker daemon is unreachable and `docker
+    stop` can't do anything)."""
+    from cadet.process.treekill import kill_process_tree, stop_container
+    stop_container(container_name_for_job(job_id), grace_s=config.get_agy_stop_grace_s())
+    kill_process_tree(pid)

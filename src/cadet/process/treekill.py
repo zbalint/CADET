@@ -47,3 +47,24 @@ def kill_process_tree(pid: int) -> None:
         os.killpg(pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
     except ProcessLookupError:
         pass
+
+
+_DOCKER_STOP_TIMEOUT_SLACK_S = 15
+
+
+def stop_container(name: str, grace_s: int = 10) -> None:
+    """Best-effort `docker stop --timeout <grace_s> <name>` for a containerized
+    agy job. Killing the docker-run client's PID (kill_process_tree) does NOT
+    reliably stop the container itself -- it's a daemon-managed object with
+    its own lifetime. Mirrors kill_process_tree's tolerance: a container
+    that's already gone ("No such container") is not an error for a
+    best-effort stop, so any nonzero exit is tolerated the same way
+    taskkill's 128 ("process not found") is, rather than special-casing an
+    exact message/exit code that could shift across Docker CLI versions."""
+    try:
+        subprocess.run(
+            ["docker", "stop", "--timeout", str(grace_s), name],
+            capture_output=True, text=True, timeout=grace_s + _DOCKER_STOP_TIMEOUT_SLACK_S,
+        )
+    except subprocess.TimeoutExpired:
+        return

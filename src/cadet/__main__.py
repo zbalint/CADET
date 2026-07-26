@@ -8,7 +8,7 @@ def main() -> None:
     # first delegate_task call or letting it surface as an opaque exception
     # from inside FastMCP's async lifespan machinery.
     try:
-        config.resolve_agy_path()
+        config.resolve_agy_docker_image()
     except RuntimeError as exc:
         print(f"CADET failed to start: {exc}", file=sys.stderr)
         sys.exit(1)

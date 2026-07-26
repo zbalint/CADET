@@ -8,7 +8,12 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 
 | Var | Default | Purpose |
 |---|---|---|
-| `CADET_AGY_PATH` | none — must resolve | Absolute path to the `agy` executable. |
+| `CADET_AGY_DOCKER_IMAGE` | `cadet-agy:latest` | Docker image tag `agy` jobs run inside (see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-agy-execution)). Must already be built (`docker build -t <image> docker/agy/`) — resolved and validated (`docker image inspect`) at server startup, failing fast if Docker isn't reachable or the image doesn't exist. Replaces the old `CADET_AGY_PATH` (retired — `agy` no longer runs as a native Windows subprocess). |
+| `CADET_AGY_GEMINI_VOLUME` | `cadet-agy-gemini` | Docker named volume mounted at `/root/.gemini` inside the container, holding the containerized `agy`'s own isolated auth/identity — deliberately separate from the host's interactive `~/.gemini`. See `cadet-setup-agy-docker` below for seeding it. |
+| `CADET_AGY_CONTAINER_MEMORY` | `2g` | `docker run --memory` limit for `agy` containers. |
+| `CADET_AGY_CONTAINER_CPUS` | `2` | `docker run --cpus` limit for `agy` containers. |
+| `CADET_AGY_CONTAINER_PIDS_LIMIT` | `512` | `docker run --pids-limit` for `agy` containers. |
+| `CADET_AGY_STOP_GRACE_S` | `10` | Grace period (`docker stop --timeout`) given to a container before it's force-killed, on job timeout/cancel/startup-reconciliation. |
 | `CADET_DEFAULT_CWD` | none | Fallback project root used by `delegate_task` when its `cwd` param is omitted. |
 | `CADET_STATE_DIR` | `~/.cadet` | Root directory for `state/cadet.db` and `logs/<job_id>/`. |
 | `CADET_MAX_CONCURRENT` | `2` | Maximum concurrent `agy` subprocesses; extra jobs queue as `pending`. |
@@ -17,7 +22,7 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 | `CADET_LOG_RETENTION_DAYS` | `14` | Terminal jobs' log directories and DB rows older than this are swept on startup and by a periodic in-process sweep (an `asyncio.sleep` loop — no external scheduler needed). |
 | `CADET_AGY_MODEL` | none (agy's own default) | Passed through as `agy --model` unless overridden per-call by `delegate_task`'s `model` param. E.g. `gemini-3.6-flash-medium`. |
 | `CADET_AGY_EFFORT` | none (agy's own default) | Passed through as `agy --effort` unless overridden per-call. One of `low`\|`medium`\|`high`. |
-| `CADET_AGY_SANDBOX` | `true` | Whether to pass `agy --sandbox` on every launch. See [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md#process-management) for why this defaults on — and [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior) for why it's weaker protection than the name implies (silently defeated by `skip_permissions=True`; blocks routine commands outright on Windows without matching `unsandboxed(...)` grants). |
+| `CADET_AGY_SANDBOX` | `true` | Whether to pass `agy --sandbox` on every launch, run inside the container alongside the container's own isolation (see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-agy-execution)). Whether this flag still matters/behaves differently on Linux vs. the Windows findings in [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior) is an open question — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-container-behavior). |
 | `CADET_AGY_SETTINGS_PATH` | `~/.gemini/antigravity-cli/settings.json` | Where `cadet-install-agy-permissions` reads/writes `agy`'s permission config. Override mainly for testing — `agy` itself has no flag to point at an alternate settings file, so this only affects CADET's own tooling, not what `agy` actually reads at runtime. |
 | `CADET_WEB_ENABLED` | `true` | Whether to start the embedded web dashboard (see [WEB_DASHBOARD.md](./WEB_DASHBOARD.md)) alongside the MCP server. |
 | `CADET_WEB_HOST` | `127.0.0.1` | Bind host for the dashboard. Loopback-only by default — there's no authentication, so only change this if you understand the exposure. |
@@ -56,8 +61,8 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 `agy`, `codex`, `cursor`, and `copilot` are all the providers CADET currently supports, each with
 real env vars wired up following the exact same pattern above. A provider with no `_PATH` set
 simply isn't offered — `delegate_task(provider=...)` for it returns a clean `{"error": ...}` rather
-than the server failing to start (unlike `CADET_AGY_PATH`, which stays required/fail-fast at
-startup for backward compatibility).
+than the server failing to start (unlike `agy`, whose `CADET_AGY_DOCKER_IMAGE` resolution stays
+required/fail-fast at startup for backward compatibility with the original single-provider design).
 
 ## Setup step: `cadet-install-agy-permissions`
 
@@ -85,6 +90,38 @@ permission/sandbox behavior is controlled entirely via per-invocation flags inst
 [ARCHITECTURE.md](./ARCHITECTURE.md#provider-abstraction)). There is no
 `cadet-install-<provider>-permissions` for those.
 
+Whether this allow-list is still needed at all once `agy` runs in a container is an open question
+— see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-container-behavior).
+
+## Setup step: `cadet-setup-agy-docker`
+
+A manual, one-time console script (`src/cadet/process/agy_docker_setup.py`, registered in
+`pyproject.toml`) that seeds the `CADET_AGY_GEMINI_VOLUME` Docker volume from the host's
+`~/.gemini`: `oauth_creds.json`, `google_accounts.json`, `installation_id`, the top-level
+`settings.json`, and `antigravity-cli/settings.json` — deliberately **not** the large volatile dirs
+(conversation history, cache, crashes) so the container never shares the host's interactive session
+state. Always overwrites on re-run (unlike `cadet-install-agy-permissions`'s additive merge) since
+these are live auth tokens that should track the host's current login.
+
+```
+cadet-setup-agy-docker          # seeds/reseeds the volume, reports what was copied
+cadet-setup-agy-docker --check  # reports which files are present without writing; exit 1 if any missing
+```
+
+**This alone does not satisfy authentication.** The Linux build of `agy` uses a completely
+different credential file (`antigravity-cli/antigravity-oauth-token`) than the Windows build
+(`oauth_creds.json`) — confirmed empirically, no cross-platform copy is possible (see
+[ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-container-behavior)). After seeding, a one-time
+interactive login is required:
+
+```
+docker run --rm -it -v cadet-agy-gemini:/root/.gemini cadet-agy:latest agy -p "say OK" --print-timeout 120s
+```
+
+This prints a Google OAuth URL; visit it, approve, and paste the resulting authorization code back
+into the same terminal. The result is written into the same named volume, so it persists for every
+subsequent containerized job — this is a one-time step per volume, not per job.
+
 ## Companion script: `cadet-wait-for-job`
 
 A console script (`pyproject.toml`'s `[project.scripts]`) that blocks/polls in-process
@@ -109,13 +146,14 @@ deliberately kept below Bash's own 600s `run_in_background` timeout ceiling, sin
 single invocation cannot safely promise to wait out a job's full possible
 `CADET_MAX_TIMEOUT_S` (up to 7200s).
 
-## `CADET_AGY_PATH` must be absolute
+## `CADET_AGY_DOCKER_IMAGE` must already be built
 
-MCP-launched server processes often don't inherit the full interactive-shell `PATH` — the same
-gotcha SALTMDB's own install docs call out for resolving `python`. CADET should resolve
-`CADET_AGY_PATH` once at startup and **fail fast with a clear error** (not a silent no-op) if it
-doesn't point to an existing, executable file, rather than deferring the failure to the first
-`delegate_task` call.
+Unlike a host binary lookup, there's no `PATH`-resolution gotcha here — but the equivalent fail-fast
+contract still applies. CADET resolves `CADET_AGY_DOCKER_IMAGE` once at startup via `docker image
+inspect` and **fails fast with a clear error** (not a silent no-op) if Docker isn't reachable or the
+image hasn't been built (`docker build -t cadet-agy:latest docker/agy/`), rather than deferring the
+failure to the first `delegate_task` call. This replaces the old `CADET_AGY_PATH` requirement — see
+[ARCHITECTURE.md](./ARCHITECTURE.md#containerized-agy-execution).
 
 ## Directory layout
 
