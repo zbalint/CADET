@@ -178,6 +178,20 @@ class TestRunJobLifecycle(DispatcherTestCase):
         self.assertEqual(job["status"], "succeeded")
         self.assertEqual(job["pid"], 444)
 
+    async def test_configured_cursor_provider_dispatches_via_spawn_cursor(self):
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "C:\\tools\\agy.exe", "cursor": "C:\\tools\\cursor-agent.cmd"},
+            max_concurrent=2, db_path=self.db_path,
+        )
+        self._create_pending_job(provider="cursor")
+        with patch("cadet.jobs.dispatcher.spawn_cursor", AsyncMock(return_value=_make_proc(pid=555, wait_return=0))):
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-1")
+
+        job = job_store.get_job("job-1", db_path=self.db_path)
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(job["pid"], 555)
+
 
 class TestCancel(DispatcherTestCase):
     async def test_cancel_pending_job(self):

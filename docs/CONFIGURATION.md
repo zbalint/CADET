@@ -32,15 +32,23 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 | `CADET_CODEX_EFFORT` | none (codex's own default) | Passed through as `codex exec -c model_reasoning_effort=<value>` unless overridden per-call. |
 | `CADET_CODEX_SANDBOX` | `true` | Whether `sandbox=True` maps to `-s read-only` (the safe default) vs `-s workspace-write`. **`workspace-write` is currently broken on Windows** (missing `codex-windows-sandbox-setup.exe` helper — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-codex-cli-behavior)), so `codex` jobs are effectively read-only unless `skip_permissions=True` is also passed per-call, which maps to `--dangerously-bypass-approvals-and-sandbox` (the only flag confirmed to actually apply edits headlessly). |
 
+### `cursor` provider env vars
+
+| Var | Default | Purpose |
+|---|---|---|
+| `CADET_CURSOR_PATH` | none — provider unavailable if unset | Absolute path to `cursor-agent.ps1` (e.g. `C:\Users\<user>\AppData\Local\cursor-agent\cursor-agent.ps1`) — **not** `cursor-agent.cmd`. `providers/cursor.py` invokes it via `powershell.exe -File` directly; pointing at the `.cmd` instead routes through `cmd.exe`, which corrupts CADET's own rendered prompt (see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior)). Not required at server startup — if unset, `cursor` just isn't in `delegate_task`'s available providers and requesting it returns a clean `{"error": ...}`. |
+| `CADET_CURSOR_MODEL` | `auto` | Passed through as `cursor-agent --model` unless overridden per-call by `delegate_task`'s `model` param. **Always passed explicitly** (never omitted) — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior) for why omitting `--model` is unsafe (it inherits a sticky global default from `~/.cursor/cli-config.json` instead of a stateless vendor default). Free-tier accounts can only use `auto`; named models require a paid plan. |
+| `CADET_CURSOR_EFFORT` | none (no effort applied) | Applied as a bracket override on the model string (`<model>[effort=<value>]`) only when a model is also set. **UNCONFIRMED** against a real call — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior). |
+| `CADET_CURSOR_SANDBOX` | `true` | Whether `sandbox=True` maps to `--mode plan` (genuinely read-only, confirmed) vs. omitting `--mode` entirely. **The `sandbox=False` + `skip_permissions=False` combo does not reliably apply edits on this platform** (no TTY to approve the tool call, despite an exit-0 success claim) — pass `skip_permissions=True` (maps to `--force`, paired with the always-on `--trust`) for real edits instead. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior). |
+
 ### Other providers (planned)
 
-`agy` and `codex` are the only providers with real env vars wired up today. Once `cursor`/
-`copilot` provider modules land (see [ARCHITECTURE.md](./ARCHITECTURE.md#provider-abstraction)),
-each gets its own `CADET_<PROVIDER>_PATH`/`_MODEL`/`_EFFORT`/`_SANDBOX` vars following the exact
-same pattern as above. A provider with no `_PATH` set simply isn't offered —
-`delegate_task(provider=...)` for it returns a clean `{"error": ...}` rather than the server
-failing to start (unlike `CADET_AGY_PATH`, which stays required/fail-fast at startup for backward
-compatibility).
+`agy`, `codex`, and `cursor` are the providers with real env vars wired up today. Once a `copilot`
+provider module lands (see [ARCHITECTURE.md](./ARCHITECTURE.md#provider-abstraction)), it gets its
+own `CADET_COPILOT_PATH`/`_MODEL`/`_EFFORT`/`_SANDBOX` vars following the exact same pattern as
+above. A provider with no `_PATH` set simply isn't offered — `delegate_task(provider=...)` for it
+returns a clean `{"error": ...}` rather than the server failing to start (unlike `CADET_AGY_PATH`,
+which stays required/fail-fast at startup for backward compatibility).
 
 ## Setup step: `cadet-install-agy-permissions`
 

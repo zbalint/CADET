@@ -48,14 +48,17 @@ Each provider is a plain Python module under `src/cadet/process/providers/` expo
 `provider` param (default `"agy"`) selects which module handles a job; `src/cadet/process/
 providers/registry.py` is the single source of truth for which provider names are known.
 
-**`agy` and `codex` are wired up today.** Cursor CLI and GitHub Copilot CLI are planned as
-separate follow-up phases, each gated on an empirical validation pass against the real installed
-binary — vendor docs leave real ambiguity about whether each CLI's default invocation actually
-applies edits or silently no-ops (e.g. Cursor reportedly needs `--force` just to apply anything).
-It's an accepted outcome if a given provider ends up only safely usable for read-only/analysis
-tasks initially — this is exactly what happened with `codex`'s default (see "Validated `codex`
-CLI behavior" below): its safe default is read-only, and real edits require `skip_permissions=True`
-on this platform until an upstream Windows bug is fixed.
+**`agy`, `codex`, and `cursor` are wired up today.** GitHub Copilot CLI is planned as a separate
+follow-up phase, gated on an empirical validation pass against the real installed binary — vendor
+docs leave real ambiguity about whether a CLI's default invocation actually applies edits or
+silently no-ops. It's an accepted outcome if a given provider ends up only safely usable for
+read-only/analysis tasks initially — this is exactly what happened with `codex`'s default (see
+"Validated `codex` CLI behavior" below): its safe default is read-only, and real edits require
+`skip_permissions=True` on this platform until an upstream Windows bug is fixed. `cursor`'s
+situation is subtler still (see "Validated `cursor` CLI behavior" below): its safe read-only lever
+(`--mode plan`) genuinely works, but the "just apply edits, still gate risky commands" middle
+ground doesn't — confirmed via a live invocation that silently declined a file write while its own
+final message dishonestly claimed success.
 
 ## The `context_id` thread
 
@@ -274,6 +277,76 @@ invocations against a scratch directory, not vendor docs alone:
   of "usage limit reached" phrasing, explicitly marked unconfirmed in its docstring — same
   opportunistic-enrichment posture as `agy`'s parser, not a correctness requirement.
 
+## Validated `cursor` CLI behavior
+
+Confirmed empirically against the installed CLI (`cursor-agent`, Windows, free-tier account), on
+2026-07-26 — real invocations against scratch directories, not vendor docs alone:
+
+- **Critical — `CADET_CURSOR_PATH` must point at `cursor-agent.ps1`, invoked via `powershell.exe
+  -File`, not at the vendor's own `cursor-agent.cmd` invoked directly.** The `.cmd` is a thin
+  `cmd.exe` batch wrapper (`... %*`) around the real `cursor-agent.ps1`. Exec'ing a `.cmd` file
+  directly via `asyncio.create_subprocess_exec` on Windows routes it through `cmd.exe`, which
+  re-parses the whole command line for its own metacharacters (`<`, `>`, `&`, `|`, `^`) before the
+  batch script's `%*` ever sees it — this is `cmd.exe`'s line-level redirection parsing, not shell
+  string interpolation, so it happens regardless of how carefully the argv list itself is quoted.
+  CADET's own rendered prompt template (`prompt/template.py`) contains a literal `<one-line
+  summary + outcome>` placeholder — **every real `delegate_task` call for `cursor` silently
+  corrupted its own argv** when routed through the `.cmd`. Reproduced directly: a trivial
+  ASCII-only prompt worked fine through the `.cmd`, but the real rendered prompt — through the
+  identical `spawn()` code path — made `--trust` effectively disappear, producing the exact
+  "Workspace Trust Required" exit-1 failure described below on every single job. Invoking
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <cursor-agent.ps1 path> <same argv>`
+  instead — bypassing `cmd.exe` entirely — was confirmed via a live run with the actual rendered
+  prompt: file written with correct content, real SALTMDB tool calls executed per the prompt's own
+  instructions. `-File` forwards each argument to the script literally; PowerShell does not
+  re-interpret `<`/`>` there. `cursor-agent.ps1` itself dynamically resolves whatever the latest
+  installed version under `<install-dir>\versions\<version>\` is, so this still survives `cursor-
+  agent update` (unlike hardcoding a specific version's `node.exe`+`index.js` pair directly).
+- **Real jobs can take noticeably longer to exit than to finish their visible work.** One
+  confirmed run: the model's conversation (including real SALTMDB tool calls) completed and the
+  target file was written well under a minute in, but `proc.wait()` didn't resolve until ~47s
+  later. Not an infinite hang — it did return, exit code `0` — and CADET's own per-job `timeout_s`
+  + `kill_process_tree` already covers the worst case regardless, same as any other provider.
+- **A directory `cursor-agent` has never seen before needs BOTH `--trust` and `--force`/`--yolo`
+  together for a real edit to apply — neither flag alone is reliable.** The very first-ever
+  headless invocation on this machine (no flags at all) printed an explicit "Workspace Trust
+  Required" banner and exited `1`. After that, new directories no longer show the banner (a
+  one-time, machine-wide onboarding gate, not a per-directory one), but `--force`/`--yolo` alone on
+  a brand-new directory still silently declined the edit — exit `0`, no file written, **and the
+  model's own final text falsely claimed success** (e.g. "Created `foo.txt`..."). Reproduced as a
+  clean A/B on identical fresh directories: `--force` alone failed; adding `--trust` alongside it
+  made the same edit actually land. `providers/cursor.py`'s `build_argv` always passes `--trust`
+  unconditionally for this reason.
+- **`--mode plan` is the genuinely safe/read-only lever — not `--sandbox`.** `--mode plan`
+  confirmed to produce no file write and no false success claim, even with `--trust --force` also
+  present. `--sandbox enabled` (the vendor's own OS-level sandbox toggle), by contrast, hard-errors
+  immediately on Windows: `Error: Sandbox mode is enabled but not available on this system.
+  Sandbox requires macOS or Linux.` — never passed by CADET on this platform.
+- **The "safe-but-functional" middle ground (`sandbox=False`, `skip_permissions=False`) does not
+  work headlessly, the same "known non-functional combo" class as `codex`'s broken
+  `workspace-write` on Windows** — just for a different reason (no TTY to approve the edit, rather
+  than a missing OS helper). `providers/cursor.py` maps `skip_permissions=True` to `--force`
+  (real edits, confirmed working when paired with the unconditional `--trust`) and falls back to
+  `--mode plan` whenever `sandbox=True`; the `sandbox=False, skip_permissions=False` combo is left
+  as a documented non-functional caveat rather than worked around.
+- **`--model` must always be passed explicitly — never omitted.** Vendor behavior: omitting
+  `--model` doesn't fall back to a stateless CLI default, it inherits whatever model string was
+  last selected *globally* across every `cursor-agent` invocation on the machine, persisted in
+  `~/.cursor/cli-config.json`. Confirmed the hard way during validation: passing an
+  account-unavailable named model once made that same model the sticky default for every
+  subsequent call — including plain interactive use outside CADET entirely — until explicitly
+  reset with `--model auto`. `providers/cursor.py` defaults to `"auto"` (the only model available
+  on free-tier accounts) whenever CADET's own `model` param is unset, specifically to avoid ever
+  relying on that ambient global state.
+- **Effort has no dedicated flag** — vendor docs describe bracket overrides on the model string
+  itself (e.g. `'claude-opus-4-8[context=1m,effort=high]'`). `providers/cursor.py` applies this
+  syntax (`f"{model}[effort={effort}]"`) only when both are set. **UNCONFIRMED against a real
+  call** — this account is free-tier and can only use `auto`, which the bracket syntax was never
+  validated against.
+- **No structured quota-exhaustion signal was found** — this account never hit a real rate limit
+  during validation. `providers/cursor.py`'s `parse_error` is best-effort only, same unconfirmed
+  posture as `codex`'s.
+
 ## Quota exhaustion detection
 
 Because the failure text above is a real, current, machine-parseable format (not a guess), CADET
@@ -337,11 +410,17 @@ than CADET building a new notification channel of its own.
    under one `context_id` instead of relying solely on `agy` cold-reading SALTMDB each time. Not
    adopted in v1 because it's unverified whether `-p` (print) mode exposes the new conversation's
    ID anywhere capturable by CADET after a run. Worth revisiting once that's confirmed.
-7. **Quota-exhaustion wording is only empirically confirmed for `agy`.** `codex`'s `parse_error`
-   (and any future `cursor`/`copilot` equivalent) is a best-effort guess at vendor wording, never
-   validated against a real exhausted-quota failure — forcing one deliberately to test it wasn't
-   attempted, since it burns real quota. Until each provider has its own confirmed reproduction
-   (the next time one is naturally exhausted during real usage — capture the exact stderr then), a
-   `null` `error_kind` on a failed non-agy job does **not** mean "definitely not a quota issue" —
-   it may just mean the guessed regex didn't match. Check raw `stderr` via `get_task_output`
-   rather than trusting `error_kind` alone for non-agy providers in the meantime.
+7. **Quota-exhaustion wording is only empirically confirmed for `agy`.** `codex`'s and `cursor`'s
+   `parse_error` (and any future `copilot` equivalent) are best-effort guesses at vendor wording,
+   never validated against a real exhausted-quota failure — forcing one deliberately to test it
+   wasn't attempted, since it burns real quota. Until each provider has its own confirmed
+   reproduction (the next time one is naturally exhausted during real usage — capture the exact
+   stderr then), a `null` `error_kind` on a failed non-agy job does **not** mean "definitely not a
+   quota issue" — it may just mean the guessed regex didn't match. Check raw `stderr` via
+   `get_task_output` rather than trusting `error_kind` alone for non-agy providers in the meantime.
+8. **`cursor`'s "safe-but-functional" edit mode is unreachable headlessly.** Unlike `codex` (whose
+   broken middle ground is a Windows-specific upstream bug that could plausibly be fixed
+   upstream), `cursor`'s gap looks structural: real edits require bypassing tool-call approval
+   entirely (`--force`), and there is no confirmed way to allow edits while still gating other
+   risky actions without a TTY present. Revisit if a future `cursor-agent` version adds a
+   headless-safe approval channel.
