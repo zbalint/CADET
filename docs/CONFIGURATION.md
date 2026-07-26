@@ -43,6 +43,30 @@ the repo on every server start would be more invasive than warranted) and for th
 findings (two-gate `command`/`unsandboxed` permissions, literal-only rule matching) this list is
 built from.
 
+## Companion script: `cadet-wait-for-job`
+
+A console script (`pyproject.toml`'s `[project.scripts]`) that blocks/polls in-process
+against the job store until a given job reaches a terminal status or an internal
+max-wait ceiling (default 540s, override with `--max-wait`) is hit. Not an MCP tool —
+see [MCP_TOOLS.md](./MCP_TOOLS.md#companion-script-cadet-wait-for-job-not-an-mcp-tool)
+for why it deliberately lives outside the 5-tool MCP surface.
+
+```
+cadet-wait-for-job <job_id> [--interval SECONDS] [--max-wait SECONDS]
+```
+
+Exit codes: `0` succeeded, `1` reached a non-success terminal status, `2` max-wait
+ceiling hit (job still unresolved — re-invoke or call `check_task_status`), `3` job_id
+not found (or missing argument).
+
+Intended usage: Claude Code runs this via its own `Bash` tool with
+`run_in_background: true` immediately after `delegate_task` returns a `job_id` — this
+piggybacks on the harness's own Bash-background auto-notify behavior instead of
+CADET building a push channel of its own. The internal max-wait ceiling is
+deliberately kept below Bash's own 600s `run_in_background` timeout ceiling, since a
+single invocation cannot safely promise to wait out a job's full possible
+`CADET_MAX_TIMEOUT_S` (up to 7200s).
+
 ## `CADET_AGY_PATH` must be absolute
 
 MCP-launched server processes often don't inherit the full interactive-shell `PATH` — the same

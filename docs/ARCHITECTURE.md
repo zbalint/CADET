@@ -221,6 +221,19 @@ does best-effort detection rather than treating every failure as opaque:
   Claude to act on — e.g. switching a subsequent `delegate_task`'s `model` to the other pool, or
   logging the reset ETA to SALTMDB so other sessions don't rediscover it the hard way.
 
+## The polling-forgetfulness problem
+
+`delegate_task` never blocks (by design — see above), which means the calling agent
+(Claude Code) is solely responsible for remembering to poll `check_task_status`/
+`get_task_output` afterward. In practice this has been forgotten for extended
+periods. CADET addresses this **outside** the MCP tool surface: a companion console
+script, `cadet-wait-for-job` (see
+[MCP_TOOLS.md](./MCP_TOOLS.md#companion-script-cadet-wait-for-job-not-an-mcp-tool)
+and [CONFIGURATION.md](./CONFIGURATION.md#companion-script-cadet-wait-for-job)),
+which Claude Code backgrounds via its own `Bash` tool right after `delegate_task`,
+piggybacking on the harness's existing Bash-background auto-notify behavior rather
+than CADET building a new notification channel of its own.
+
 ## Open questions / risks (unresolved — flagged for whoever implements next)
 
 1. **`agy`'s exit code conflates "process didn't crash" with "task actually succeeded."** Beyond

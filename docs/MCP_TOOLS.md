@@ -114,3 +114,16 @@ status rather than erroring.
 
 All three are easy, low-risk additions later if the underlying question is resolved — not built
 now (YAGNI).
+
+## Companion script: `cadet-wait-for-job` (not an MCP tool)
+
+The "five tools total, deliberately minimal" framing above is about the MCP tool
+surface specifically. Separately, CADET also ships a plain console script,
+`cadet-wait-for-job <job_id>` (see
+[CONFIGURATION.md](./CONFIGURATION.md#companion-script-cadet-wait-for-job)), callable
+only as a subprocess — never registered as an `@mcp.tool()`, never part of this
+surface. It exists to solve a different problem than any of the 5 tools above:
+`delegate_task` never blocks, so the calling agent must remember to poll; this script
+lets Claude Code's own `Bash(run_in_background=True)` mechanism do that
+waiting/notifying instead of relying on the agent remembering to call
+`check_task_status` itself.
