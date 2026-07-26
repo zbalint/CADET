@@ -18,10 +18,13 @@ def kill_process_tree(pid: int) -> None:
     group, escalating to SIGKILL after a grace period.
     """
     if platform.system() == "Windows":
-        result = subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            capture_output=True, text=True,
-        )
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            return
         # Exit code 128 ("process not found") means it was already dead —
         # not an error for a best-effort kill.
         if result.returncode not in (0, _TASKKILL_PROCESS_NOT_FOUND):

@@ -1,3 +1,4 @@
+import subprocess
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -12,7 +13,7 @@ class TestKillProcessTreeWindows(unittest.TestCase):
         treekill.kill_process_tree(4321)
         mock_run.assert_called_once_with(
             ["taskkill", "/PID", "4321", "/T", "/F"],
-            capture_output=True, text=True,
+            capture_output=True, text=True, timeout=10,
         )
 
     @patch("cadet.process.treekill.platform.system", return_value="Windows")
@@ -25,6 +26,14 @@ class TestKillProcessTreeWindows(unittest.TestCase):
     @patch("cadet.process.treekill.subprocess.run")
     def test_unexpected_returncode_does_not_raise(self, mock_run, mock_system):
         mock_run.return_value = MagicMock(returncode=1)
+        treekill.kill_process_tree(4321)  # best-effort — never raises
+
+    @patch("cadet.process.treekill.platform.system", return_value="Windows")
+    @patch("cadet.process.treekill.subprocess.run")
+    def test_timeout_expired_does_not_raise(self, mock_run, mock_system):
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["taskkill", "/PID", "4321", "/T", "/F"], timeout=10
+        )
         treekill.kill_process_tree(4321)  # best-effort — never raises
 
 
