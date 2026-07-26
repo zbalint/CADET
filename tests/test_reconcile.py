@@ -59,10 +59,10 @@ class TestReconcileOnStartup(ReconcileTestCase):
     async def test_running_job_with_dead_pid_marked_unknown_interrupted(self):
         # A PID this large is vanishingly unlikely to be a live process on any
         # real machine — this exercises the real `tasklist` liveness check
-        # rather than mocking it, per the plan's own guidance. Non-agy
-        # provider: this PID-based path no longer applies to agy (see the
-        # container-based tests below).
-        self._insert("job-running-dead", status="pending", provider="codex")
+        # rather than mocking it, per the plan's own guidance. Still-native
+        # provider: this PID-based path no longer applies to agy/codex (see
+        # the container-based tests below).
+        self._insert("job-running-dead", status="pending", provider="cursor")
         job_store.mark_running("job-running-dead", pid=999999, started_at="t1", db_path=self.db_path)
 
         summary = await reconcile_on_startup(self.dispatcher, db_path=self.db_path)
@@ -73,7 +73,7 @@ class TestReconcileOnStartup(ReconcileTestCase):
         self.assertIn("not found at restart", job["error_message"])
 
     async def test_running_job_with_alive_pid_is_killed_and_marked(self):
-        self._insert("job-running-alive", status="pending", provider="codex")
+        self._insert("job-running-alive", status="pending", provider="cursor")
         job_store.mark_running("job-running-alive", pid=4242, started_at="t1", db_path=self.db_path)
 
         with patch("cadet.jobs.reconcile._is_pid_alive", return_value=True), \
@@ -104,6 +104,25 @@ class TestReconcileOnStartup(ReconcileTestCase):
         job = job_store.get_job("job-running-agy", db_path=self.db_path)
         self.assertEqual(job["status"], "unknown-interrupted")
         self.assertIn("agy container force-stopped", job["error_message"])
+
+    async def test_running_codex_job_stops_container_regardless_of_pid_liveness(self):
+        # Mirrors test_running_agy_job_stops_container_regardless_of_pid_liveness
+        # — codex is containerized as of Phase 3, same "docker stop
+        # unconditionally, never PID-liveness-check" rule as agy.
+        self._insert("job-running-codex", status="pending", provider="codex")
+        job_store.mark_running("job-running-codex", pid=8888, started_at="t1", db_path=self.db_path)
+
+        with patch("cadet.jobs.reconcile.stop_container") as mock_stop, \
+             patch("cadet.jobs.reconcile.kill_process_tree") as mock_kill, \
+             patch("cadet.jobs.reconcile._is_pid_alive") as mock_alive:
+            await reconcile_on_startup(self.dispatcher, db_path=self.db_path)
+
+        mock_stop.assert_called_once_with("cadet-codex-job-running-codex", ANY)
+        mock_kill.assert_not_called()
+        mock_alive.assert_not_called()
+        job = job_store.get_job("job-running-codex", db_path=self.db_path)
+        self.assertEqual(job["status"], "unknown-interrupted")
+        self.assertIn("codex container force-stopped", job["error_message"])
 
     async def test_terminal_and_running_pending_rows_untouched(self):
         self._insert("job-succeeded", status="pending")

@@ -23,6 +23,8 @@ Homepage = "https://github.com/zbalint/CADET"
 cadet-server = "cadet.__main__:main"
 cadet-install-agy-permissions = "cadet.process.agy_permissions:main"
 cadet-wait-for-job = "cadet.process.wait_for_job:main"
+cadet-setup-agy-docker = "cadet.process.agy_docker_setup:main"
+cadet-setup-codex-docker = "cadet.process.codex_docker_setup:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

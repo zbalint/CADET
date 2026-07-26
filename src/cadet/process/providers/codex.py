@@ -1,13 +1,18 @@
 """Codex CLI provider. Empirically validated 2026-07-26 against the real
-installed binary (codex 1.1.7-equivalent, Windows):
+installed binary (codex 1.1.7-equivalent, Windows), then containerized
+2026-07-27 (Phase 3, mirroring agy's Phase 2 pattern — see
+docs/ARCHITECTURE.md's "Containerized codex execution" section):
 - `codex exec "<prompt>" -C <cwd> -s workspace-write ...` silently no-ops on
   Windows — the sandbox's write-enforcement helper (codex-windows-sandbox-setup.exe)
-  fails to launch, so exit code is 0 but no file is written. Do not rely on
-  workspace-write for real edits on Windows until that's fixed upstream.
+  fails to launch, so exit code is 0 but no file is written. This — plus every
+  other CADET provider's native Windows sandbox being broken or bypassable
+  the same way (see agy's Phase 2 rollout writeup) — is exactly why codex now
+  runs exclusively inside a Docker container instead (no dual mode), same
+  decision already made for agy.
 - `-s read-only` runs cleanly (vendor default; genuinely safe, confirmed via a
-  real invocation).
+  real invocation, both natively on Windows and inside the Linux container).
 - `--dangerously-bypass-approvals-and-sandbox` is the only flag confirmed to
-  actually apply edits headlessly on this platform — mapped to CADET's existing
+  actually apply edits headlessly — mapped to CADET's existing
   `skip_permissions` knob, mirroring agy's `--dangerously-skip-permissions`.
 - `codex exec` always attempts to read stdin ("Reading additional input from
   stdin...") even when a prompt is given as an argv arg. A live subprocess
@@ -16,11 +21,20 @@ installed binary (codex 1.1.7-equivalent, Windows):
   redirects stdin to DEVNULL to guarantee immediate EOF instead.
 - `-m/--model` and `-c model_reasoning_effort=<value>` both confirmed to parse
   and take effect via a real invocation.
+- **Critical containerization finding — codex's Windows `~/.codex/auth.json`
+  is DIRECTLY PORTABLE to the Linux container, no re-auth needed** (the
+  OPPOSITE of what agy's Phase 2 found). Confirmed empirically: a scratch
+  Docker volume seeded with just the host's `auth.json` (chatgpt OAuth mode,
+  4.3KB) authenticated a real `codex exec` model call inside
+  `cadet-codex:latest` with zero interactive login step. `config.toml` was
+  A/B tested and confirmed NOT required for auth+basic exec. A **read-only**
+  bind-mount of `~/.codex` does NOT work (codex writes to its own config dir
+  even during a plain `exec`, e.g. PATH-alias bookkeeping — fails with
+  "Read-only file system"); the auth volume must be writable, same as agy's.
 """
 import asyncio
 import re
 import subprocess
-import sys
 from datetime import datetime, timedelta
 
 NAME = "codex"
@@ -59,21 +73,67 @@ def build_argv(
     return argv
 
 
+def build_docker_argv(
+    image: str, prompt_text: str, cwd: str, timeout_s: int, job_id: str,
+    model=None, effort=None, skip_permissions=False, sandbox=True,
+) -> list[str]:
+    """Wraps the inner codex invocation (build_argv, above) in `docker run`.
+    Mirrors launcher.build_argv's agy wrapping shape exactly: --rm so a
+    finished container never lingers; --name is deterministic from job_id so
+    stop() (treekill.stop_container) can target it later without needing any
+    extra state threaded through job_store. No --network flag: codex needs
+    outbound HTTPS to the ChatGPT/OpenAI API, so Docker's default bridge
+    network is left alone (never --network none). --add-dir has no codex
+    equivalent -- `-C /workspace` (inside build_argv's own cwd param) is
+    already the container-side path, never the host cwd, same "never let the
+    inner CLI see a host path" rule as agy's --add-dir."""
+    from cadet import config
+    from cadet.process.launcher import container_name_for_job
+
+    name = container_name_for_job("codex", job_id)
+    argv = [
+        "docker", "run", "--rm", "--name", name,
+        "-v", f"{cwd}:/workspace", "-w", "/workspace",
+        "-v", f"{config.get_codex_auth_volume()}:/root/.codex",
+        "--memory", config.get_codex_container_memory(),
+        "--cpus", config.get_codex_container_cpus(),
+        "--pids-limit", str(config.get_codex_container_pids_limit()),
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+        image,
+    ]
+    argv += build_argv("codex", prompt_text, "/workspace", timeout_s, model, effort, skip_permissions, sandbox)
+    return argv
+
+
 async def spawn(
-    codex_path: str, prompt_text: str, cwd: str, timeout_s: int, stdout_fh, stderr_fh,
+    image: str, prompt_text: str, cwd: str, timeout_s: int, stdout_fh, stderr_fh, job_id: str,
     model=None, effort=None, skip_permissions=False, sandbox=True,
 ):
-    """Spawn `codex exec` as a background subprocess. stdin is explicitly
-    DEVNULL — codex always probes stdin for extra input, and this process
-    otherwise inherits the CADET MCP server's own stdio transport pipe (see
-    module docstring)."""
-    argv = build_argv(codex_path, prompt_text, cwd, timeout_s, model, effort, skip_permissions, sandbox)
-    spawn_kwargs = dict(cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout_fh, stderr=stderr_fh)
-    if sys.platform == "win32":
-        spawn_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        spawn_kwargs["start_new_session"] = True
-    return await asyncio.create_subprocess_exec(*argv, **spawn_kwargs)
+    """Spawn the `docker run` client as a foreground subprocess for the
+    containerized codex provider -- see launcher.spawn_agy's docstring for
+    why this satisfies dispatcher.py's proc.pid/.wait() contract unchanged
+    (the docker-run client's PID, resolving when the container exits).
+    stdin=DEVNULL as always -- this process is a long-running MCP server's
+    subprocess; never let a child inherit its stdio transport pipe."""
+    argv = build_docker_argv(image, prompt_text, cwd, timeout_s, job_id, model, effort, skip_permissions, sandbox)
+    return await asyncio.create_subprocess_exec(
+        *argv, stdout=stdout_fh, stderr=stderr_fh, stdin=subprocess.DEVNULL,
+    )
+
+
+def stop(job_id: str, pid: int) -> None:
+    """Provider-specific stop for codex, mirroring launcher.stop_agy exactly:
+    the recorded pid is the docker-run client's PID, not the container's --
+    the container is a daemon-managed object with its own lifetime,
+    independent of that client process still being alive. stop_container is
+    the real stop; kill_process_tree(pid) afterward is a cheap, idempotent
+    defensive fallback on the client process itself."""
+    from cadet import config
+    from cadet.process.launcher import container_name_for_job
+    from cadet.process.treekill import kill_process_tree, stop_container
+    stop_container(container_name_for_job("codex", job_id), grace_s=config.get_codex_stop_grace_s())
+    kill_process_tree(pid)
 
 
 def _parse_duration_to_seconds(duration_str: str):
@@ -101,4 +161,4 @@ def parse_error(stderr_tail: str, finished_at_iso: str):
     return "quota_exhausted", reset_dt.isoformat()
 
 
-__all__ = ["NAME", "AGENT_ID", "DISPLAY_NAME", "build_argv", "spawn", "parse_error"]
+__all__ = ["NAME", "AGENT_ID", "DISPLAY_NAME", "build_argv", "build_docker_argv", "spawn", "stop", "parse_error"]

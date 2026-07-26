@@ -123,6 +123,57 @@ no dual native/container mode for `agy`. `codex`/`cursor`/`copilot` are untouche
   fail-fast check at server startup is now "is Docker reachable and is `cadet-agy:latest` built"
   (`docker image inspect`) rather than "does a host `agy.exe` exist." `CADET_AGY_PATH` is retired.
 
+## Containerized `codex` execution
+
+Phase 3: the same containerization decision made for `agy` (see above), applied to `codex` —
+`codex`'s native Windows execution was already read-only-only in practice (its `workspace-write`
+sandbox helper never worked on Windows, see "Validated `codex` CLI behavior" below), so moving it
+into a container is a strict improvement, not just consistency for its own sake. Replaces `codex`'s
+native Windows subprocess execution entirely — no dual mode. `cursor`/`copilot` are untouched by
+this change.
+
+- **Image**: `docker/codex/Dockerfile` — same minimal `debian:bookworm-slim` + `git` +
+  `python3`/`pip3` base as `agy`'s image. Extracts the official Linux x86_64 release
+  (`codex-x86_64-unknown-linux-musl.tar.gz` from `openai/codex`, release tag `rust-v0.145.0` — note
+  the `rust-v` tag prefix, a different convention than agy's bare-version tag; the tarball contains a
+  single statically-linked file named `codex-x86_64-unknown-linux-musl`, renamed to `codex` at build
+  time). Built/tagged locally as `cadet-codex:latest` (`docker build -t cadet-codex:latest
+  docker/codex/`) — no registry, single machine only.
+- **Auth**: a dedicated Docker named volume (`cadet-codex-auth`, see `CADET_CODEX_AUTH_VOLUME` in
+  [CONFIGURATION.md](./CONFIGURATION.md)) holds the containerized `codex`'s own identity. **Unlike
+  `agy`, codex's Windows `~/.codex/auth.json` is directly portable to the Linux container — no
+  re-authentication step required.** Confirmed empirically: seeding the volume with just the host's
+  `auth.json` (via `src/cadet/process/codex_docker_setup.py` / `cadet-setup-codex-docker`) let a real
+  containerized `codex exec` call authenticate and complete successfully with zero interactive login.
+  `config.toml` was also confirmed unnecessary for auth+basic exec (A/B tested). A **read-only**
+  bind-mount of the host's `~/.codex` does NOT work — `codex` writes to its own config dir even
+  during a plain `exec` (PATH-alias bookkeeping) and fails with "Read-only file system"; the volume
+  must be writable, same requirement as `agy`'s.
+- **Invocation**: `src/cadet/process/providers/codex.py`'s `build_docker_argv` wraps the existing
+  pure `build_argv` (unchanged inner CLI-flag logic — `-C /workspace` always targets the
+  container-side path now, never a host path) inside `docker run --rm --name <container>`, with
+  `-v <cwd>:/workspace -w /workspace`, `-v cadet-codex-auth:/root/.codex`, the same resource-limit and
+  hardening flags as `agy`'s container (`--memory`, `--cpus`, `--pids-limit`, `--cap-drop=ALL`,
+  `--security-opt=no-new-privileges`), no `--network none`. Container name is deterministic
+  (`cadet-codex-<job_id>`), via the same `launcher.container_name_for_job(provider, job_id)` agy
+  uses (generalized to take a provider name in Phase 3).
+- **Stop/cancel/reconcile**: identical shape to `agy`'s — the recorded `pid` is the `docker run`
+  client's, not the container's own lifetime. `providers/codex.py`'s `stop(job_id, pid)` mirrors
+  `launcher.stop_agy` exactly. `dispatcher.py`'s stop-fn selection (`Dispatcher._stop_fns()`, a
+  provider→stop-fn dict shared by both the timeout/lost-race path and `cancel()` — refactored in
+  this same phase so `cancel()` picks up codex's container-stop path too, avoiding the kind of
+  latent per-call-site gap `reconcile.py` had during agy's own Phase 2) and `reconcile.py`'s startup
+  loop both treat `agy` and `codex` identically now (`provider_name in ("agy", "codex")`).
+- **Bootstrap**: `config.resolve_codex_docker_image()` mirrors `resolve_agy_docker_image()` (both
+  now share a `_resolve_docker_image(image, build_hint)` helper) — `CADET_CODEX_PATH` (host binary
+  path) is retired in favor of Docker image resolution.
+- **Known open issue (not `codex`-specific — also affects `agy`)**: cancelling a containerized job
+  extremely fast (~0.3s after `delegate_task`, before the container has actually reached "Running")
+  can leave an orphaned `Created`-state container behind — Docker's `--rm` auto-remove only fires on
+  an exit-from-running event, not on a `docker stop` against a never-started container. Confirmed via
+  real testing; not yet fixed in `treekill.stop_container` (a candidate fix is an unconditional
+  `docker rm -f` after `docker stop`, not yet implemented). Low real-world likelihood, not blocking.
+
 ## The `context_id` thread
 
 `context_id` is the single correlation key connecting all three systems:
@@ -326,6 +377,39 @@ container invocations, not assumptions:
     with anything `agy`'s own sandbox implementation needs internally.
   - Whether the default resource limits (`2g` memory / `2` cpus / `512` pids) are adequate for a
     realistic job (e.g. running a delegated repo's own test suite).
+
+## Validated `codex` container behavior
+
+Confirmed empirically against `cadet-codex:latest` (Docker Desktop, WSL2 backend), 2026-07-27 — real
+container invocations, not assumptions:
+
+- **`codex --version` inside the container reports `codex-cli 0.145.0`**, matching the host's native
+  Windows install exactly.
+- **Auth is directly cross-platform-portable — the opposite of `agy`'s finding.** A scratch Docker
+  volume seeded with only the host's `~/.codex/auth.json` (chatgpt OAuth mode, ~4.3KB) let a real
+  `codex exec "Say PONG"` call inside the container authenticate and return a correct real model
+  response with zero interactive login step. A/B tested whether `config.toml` was also needed —
+  it was not; `auth.json` alone is sufficient for auth+basic exec.
+- **A read-only bind-mount of the host's `~/.codex` does NOT work.** First attempt bind-mounted
+  `~/.codex:/root/.codex:ro` directly — failed with `Read-only file system (os error 30)` during
+  `codex`'s own app-server client init (it writes to its config dir, e.g. PATH-alias bookkeeping,
+  even during a plain `exec`). Fixed by using a writable Docker volume instead, same requirement as
+  `agy`'s.
+- **Real end-to-end `Dispatcher.run_job` succeeded**: isolated `CADET_STATE_DIR`, real
+  `cadet-codex:latest` image, real seeded `cadet-codex-auth` volume, scratch git repo → `status:
+  "succeeded"`, real model response, real token-usage counts in the JSON stdout stream.
+- **Real cancel-mid-flight confirmed the container is genuinely stopped, not just a DB flip**: polled
+  `docker ps -a` until a real containerized job (running an actual `sleep 60` shell command via
+  `skip_permissions=True`) was confirmed `Up`, then called `dispatcher.cancel()` — `docker ps -a`
+  showed nothing afterward.
+- **Found (not yet fixed) a fast-cancel edge case**: cancelling before the container reaches
+  "Running" (~0.3s after enqueue) leaves an orphaned `Created`-state container that `--rm` never
+  reaps. See "Containerized `codex` execution" above for detail — affects `agy`'s stop path too.
+- **Still unverified** (same posture as `agy`'s equivalent open items): whether `codex`'s own
+  `-s`/sandbox flags behave any differently on Linux vs. the (broken) Windows path; whether an
+  expired `access_token` refreshes silently via `tokens.refresh_token` inside the container the same
+  way it presumably does natively (this session's test used a freshly-valid token); resource-limit
+  adequacy for a realistic job.
 
 ## Validated `codex` CLI behavior
 

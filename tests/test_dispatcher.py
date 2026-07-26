@@ -130,9 +130,12 @@ class TestRunJobLifecycle(DispatcherTestCase):
         job = job_store.get_job("job-1", db_path=self.db_path)
         self.assertEqual(job["status"], "timeout")
 
-    async def test_timeout_for_non_agy_provider_still_uses_kill_process_tree(self):
+    async def test_timeout_for_codex_provider_stops_container(self):
+        # codex is containerized as of Phase 3 (mirrors agy's Phase 2): the
+        # recorded pid is the docker-run client's, not the container's own
+        # lifetime. See providers.codex.stop.
         self.dispatcher = Dispatcher(
-            executable_paths={"agy": "C:\\tools\\agy.exe", "codex": "C:\\tools\\codex.exe"},
+            executable_paths={"agy": "cadet-agy:latest", "codex": "cadet-codex:latest"},
             max_concurrent=2, db_path=self.db_path,
         )
         self._create_pending_job(provider="codex", timeout_s=0.05)
@@ -150,14 +153,45 @@ class TestRunJobLifecycle(DispatcherTestCase):
 
         with patch("cadet.jobs.dispatcher.spawn_codex", AsyncMock(return_value=proc)), \
              patch("cadet.jobs.dispatcher.kill_process_tree") as mock_kill, \
-             patch("cadet.jobs.dispatcher.stop_agy_container") as mock_stop:
+             patch("cadet.jobs.dispatcher.stop_codex_container") as mock_stop:
             await self.dispatcher._semaphore.acquire()
             await self.dispatcher.run_job("job-1")
 
-        # Locks in the "only agy's stop path changed" guarantee: non-agy
-        # providers are untouched by the containerization work.
-        mock_kill.assert_called_once_with(223)
-        mock_stop.assert_not_called()
+        mock_stop.assert_called_once_with("job-1", 223)
+        mock_kill.assert_not_called()
+        job = job_store.get_job("job-1", db_path=self.db_path)
+        self.assertEqual(job["status"], "timeout")
+
+    async def test_timeout_for_cursor_provider_still_uses_kill_process_tree(self):
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "cadet-agy:latest", "cursor": "C:\\tools\\cursor-agent.ps1"},
+            max_concurrent=2, db_path=self.db_path,
+        )
+        self._create_pending_job(provider="cursor", timeout_s=0.05)
+        wait_calls = {"n": 0}
+
+        async def fake_wait():
+            wait_calls["n"] += 1
+            if wait_calls["n"] == 1:
+                await asyncio.sleep(10)
+            return -9
+
+        proc = MagicMock()
+        proc.pid = 224
+        proc.wait = fake_wait
+
+        with patch("cadet.jobs.dispatcher.spawn_cursor", AsyncMock(return_value=proc)), \
+             patch("cadet.jobs.dispatcher.kill_process_tree") as mock_kill, \
+             patch("cadet.jobs.dispatcher.stop_agy_container") as mock_stop_agy, \
+             patch("cadet.jobs.dispatcher.stop_codex_container") as mock_stop_codex:
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-1")
+
+        # Locks in the "only agy's and codex's stop paths changed" guarantee:
+        # cursor/copilot are untouched by the containerization work so far.
+        mock_kill.assert_called_once_with(224)
+        mock_stop_agy.assert_not_called()
+        mock_stop_codex.assert_not_called()
         job = job_store.get_job("job-1", db_path=self.db_path)
         self.assertEqual(job["status"], "timeout")
 
@@ -274,20 +308,37 @@ class TestCancel(DispatcherTestCase):
         # single-writer design documented in dispatcher.cancel's docstring.
         self.assertEqual(job_store.get_job("job-1", db_path=self.db_path)["status"], "running")
 
-    async def test_cancel_running_job_for_non_agy_provider_still_uses_kill_process_tree(self):
+    async def test_cancel_running_job_for_codex_provider_stops_container(self):
         self.dispatcher = Dispatcher(
-            executable_paths={"agy": "C:\\tools\\agy.exe", "codex": "C:\\tools\\codex.exe"},
+            executable_paths={"agy": "cadet-agy:latest", "codex": "cadet-codex:latest"},
             max_concurrent=2, db_path=self.db_path,
         )
         self._create_pending_job(provider="codex")
-        job_store.mark_running("job-1", pid=556, started_at="t1", db_path=self.db_path)
+        job_store.mark_running("job-1", pid=557, started_at="t1", db_path=self.db_path)
 
         with patch("cadet.jobs.dispatcher.kill_process_tree") as mock_kill, \
-             patch("cadet.jobs.dispatcher.stop_agy_container") as mock_stop:
+             patch("cadet.jobs.dispatcher.stop_codex_container") as mock_stop:
             await self.dispatcher.cancel("job-1")
 
-        mock_kill.assert_called_once_with(556)
-        mock_stop.assert_not_called()
+        mock_stop.assert_called_once_with("job-1", 557)
+        mock_kill.assert_not_called()
+
+    async def test_cancel_running_job_for_cursor_provider_still_uses_kill_process_tree(self):
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "cadet-agy:latest", "cursor": "C:\\tools\\cursor-agent.ps1"},
+            max_concurrent=2, db_path=self.db_path,
+        )
+        self._create_pending_job(provider="cursor")
+        job_store.mark_running("job-1", pid=558, started_at="t1", db_path=self.db_path)
+
+        with patch("cadet.jobs.dispatcher.kill_process_tree") as mock_kill, \
+             patch("cadet.jobs.dispatcher.stop_agy_container") as mock_stop_agy, \
+             patch("cadet.jobs.dispatcher.stop_codex_container") as mock_stop_codex:
+            await self.dispatcher.cancel("job-1")
+
+        mock_kill.assert_called_once_with(558)
+        mock_stop_agy.assert_not_called()
+        mock_stop_codex.assert_not_called()
 
     async def test_cancel_flag_causes_run_job_to_finalize_as_cancelled(self):
         self._create_pending_job(timeout_s=5)

@@ -4,10 +4,13 @@ import subprocess
 from cadet import config
 
 
-def container_name_for_job(job_id: str) -> str:
+def container_name_for_job(provider: str, job_id: str) -> str:
     """job_id is always "job-" + uuid4().hex[:12] (see mcp/tools.py), which only
-    ever contains [a-z0-9-] -- a valid Docker container name (^[a-zA-Z0-9][a-zA-Z0-9_.-]+$)."""
-    return f"cadet-agy-{job_id}"
+    ever contains [a-z0-9-] -- a valid Docker container name (^[a-zA-Z0-9][a-zA-Z0-9_.-]+$).
+    provider is one of registry.names(), also always [a-z] -- shared by every
+    containerized provider (agy, codex, ...) so each gets its own deterministic,
+    collision-free container name."""
+    return f"cadet-{provider}-{job_id}"
 
 
 def _inner_agy_argv(
@@ -46,7 +49,7 @@ def build_argv(
     any extra state threaded through job_store. No --network flag: agy needs
     outbound HTTPS to Gemini's API, so Docker's default bridge network is
     left alone (never --network none)."""
-    name = container_name_for_job(job_id)
+    name = container_name_for_job("agy", job_id)
     argv = [
         "docker", "run", "--rm", "--name", name,
         "-v", f"{cwd}:/workspace", "-w", "/workspace",
@@ -90,5 +93,5 @@ def stop_agy(job_id: str, pid: int) -> None:
     process itself (e.g. if the docker daemon is unreachable and `docker
     stop` can't do anything)."""
     from cadet.process.treekill import kill_process_tree, stop_container
-    stop_container(container_name_for_job(job_id), grace_s=config.get_agy_stop_grace_s())
+    stop_container(container_name_for_job("agy", job_id), grace_s=config.get_agy_stop_grace_s())
     kill_process_tree(pid)

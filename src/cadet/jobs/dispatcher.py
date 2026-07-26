@@ -4,11 +4,17 @@ import datetime as dt
 from cadet import config
 from cadet.db import job_store
 from cadet.process.providers.agy import spawn as spawn_agy, parse_error as parse_error_agy
-from cadet.process.providers.codex import spawn as spawn_codex, parse_error as parse_error_codex
+from cadet.process.providers.codex import spawn as spawn_codex, parse_error as parse_error_codex, stop as stop_codex_container
 from cadet.process.providers.cursor import spawn as spawn_cursor, parse_error as parse_error_cursor
 from cadet.process.providers.copilot import spawn as spawn_copilot, parse_error as parse_error_copilot
 from cadet.process.launcher import stop_agy as stop_agy_container
 from cadet.process.treekill import kill_process_tree
+
+# Providers whose spawn() needs job_id to derive a deterministic container
+# name (see launcher.container_name_for_job) -- both are containerized
+# (Phase 2: agy, Phase 3: codex); cursor/copilot's spawn() signatures are
+# untouched and never receive it.
+_CONTAINERIZED_PROVIDERS = ("agy", "codex")
 
 # NOTE: dispatch dicts referencing spawn_agy/parse_error_agy are built fresh
 # inside run_job (not module scope) so that unittest.mock.patch(
@@ -55,6 +61,22 @@ class Dispatcher:
     async def enqueue(self, job_id: str) -> None:
         await self._queue.put(job_id)
 
+    @staticmethod
+    def _stop_fns() -> dict:
+        """Provider-aware stop dispatch, shared by run_job's timeout/lost-race
+        paths and cancel()'s running-job path. Built fresh on every call (not
+        module scope) so unittest.mock.patch on the module-level
+        stop_agy_container/stop_codex_container/kill_process_tree names is
+        still honored -- a dict built once at import time would freeze the
+        original reference and silently ignore the patch, same reasoning as
+        spawn_fns/parse_error_fns below."""
+        return {
+            "agy": lambda pid, jid: stop_agy_container(jid, pid),
+            "codex": lambda pid, jid: stop_codex_container(jid, pid),
+            "cursor": lambda pid, jid: kill_process_tree(pid),
+            "copilot": lambda pid, jid: kill_process_tree(pid),
+        }
+
     async def run_job(self, job_id: str) -> None:
         stdout_fh = None
         stderr_fh = None
@@ -74,11 +96,7 @@ class Dispatcher:
             provider_name = job["provider"] or "agy"
             spawn_fns = {"agy": spawn_agy, "codex": spawn_codex, "cursor": spawn_cursor, "copilot": spawn_copilot}
             spawn_fn = spawn_fns[provider_name]
-            # agy's spawn() needs job_id to derive its deterministic container
-            # name (see launcher.container_name_for_job); the other 3
-            # providers' spawn() signatures are untouched, so job_id is only
-            # ever passed for agy.
-            extra_kwargs = {"job_id": job_id} if provider_name == "agy" else {}
+            extra_kwargs = {"job_id": job_id} if provider_name in _CONTAINERIZED_PROVIDERS else {}
 
             proc = await spawn_fn(
                 self.executable_paths[provider_name], prompt_text, job["cwd"], job["timeout_s"],
@@ -89,19 +107,11 @@ class Dispatcher:
                 **extra_kwargs,
             )
 
-            # Provider-aware stop: for agy, the recorded pid is the docker-run
-            # client's PID, not the container's own lifetime, so tree-killing
-            # it alone does not reliably stop the container (see
-            # launcher.stop_agy / treekill.stop_container). Built fresh here
-            # (not module scope) for the same reason spawn_fns/parse_error_fns
-            # are — so unittest.mock.patch on the module-level names is honored.
-            stop_fns = {
-                "agy": lambda pid, jid: stop_agy_container(jid, pid),
-                "codex": lambda pid, jid: kill_process_tree(pid),
-                "cursor": lambda pid, jid: kill_process_tree(pid),
-                "copilot": lambda pid, jid: kill_process_tree(pid),
-            }
-            stop_fn = stop_fns[provider_name]
+            # Provider-aware stop: for agy/codex, the recorded pid is the
+            # docker-run client's PID, not the container's own lifetime, so
+            # tree-killing it alone does not reliably stop the container (see
+            # launcher.stop_agy / providers.codex.stop / treekill.stop_container).
+            stop_fn = self._stop_fns()[provider_name]
 
             won = job_store.mark_running(job_id, proc.pid, _now_iso(), db_path=self.db_path)
             if not won:
@@ -189,10 +199,8 @@ class Dispatcher:
             self._cancel_flags.add(job_id)
             if job.get("pid"):
                 provider_name = job["provider"] or "agy"
-                if provider_name == "agy":
-                    await asyncio.to_thread(stop_agy_container, job_id, job["pid"])
-                else:
-                    await asyncio.to_thread(kill_process_tree, job["pid"])
+                stop_fn = self._stop_fns()[provider_name]
+                await asyncio.to_thread(stop_fn, job["pid"], job_id)
             return {"previous_status": "running", "status": "cancelled", "already_terminal": False}
 
         # Finished between our checks.

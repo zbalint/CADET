@@ -30,12 +30,20 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 
 ### `codex` provider env vars
 
+`codex` is containerized (Phase 3, mirrors `agy`) — `CADET_CODEX_PATH` (host binary path) is
+retired, replaced by Docker image resolution, same shape as `agy`'s.
+
 | Var | Default | Purpose |
 |---|---|---|
-| `CADET_CODEX_PATH` | none — provider unavailable if unset | Absolute path to the `codex` executable (e.g. `C:\Users\<user>\AppData\Local\Programs\OpenAI\Codex\bin\codex.exe`). Unlike `CADET_AGY_PATH`, not required at server startup — if unset, `codex` just isn't in `delegate_task`'s available providers and requesting it returns a clean `{"error": ...}`. |
+| `CADET_CODEX_DOCKER_IMAGE` | `cadet-codex:latest` | Docker image tag `codex` jobs run inside (see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-codex-execution)). Must already be built (`docker build -t <image> docker/codex/`) — resolved and validated (`docker image inspect`) at server startup. |
+| `CADET_CODEX_AUTH_VOLUME` | `cadet-codex-auth` | Docker named volume mounted at `/root/.codex` inside the container, holding the containerized `codex`'s own isolated auth (`auth.json`). See `cadet-setup-codex-docker` below for seeding it — unlike `agy`, no interactive re-login step is needed afterward. |
+| `CADET_CODEX_CONTAINER_MEMORY` | `2g` | `docker run --memory` limit for `codex` containers. |
+| `CADET_CODEX_CONTAINER_CPUS` | `2` | `docker run --cpus` limit for `codex` containers. |
+| `CADET_CODEX_CONTAINER_PIDS_LIMIT` | `512` | `docker run --pids-limit` for `codex` containers. |
+| `CADET_CODEX_STOP_GRACE_S` | `10` | Grace period (`docker stop --timeout`) given to a container before it's force-killed, on job timeout/cancel/startup-reconciliation. |
 | `CADET_CODEX_MODEL` | none (codex's own default) | Passed through as `codex exec -m` unless overridden per-call by `delegate_task`'s `model` param. |
 | `CADET_CODEX_EFFORT` | none (codex's own default) | Passed through as `codex exec -c model_reasoning_effort=<value>` unless overridden per-call. |
-| `CADET_CODEX_SANDBOX` | `true` | Whether `sandbox=True` maps to `-s read-only` (the safe default) vs `-s workspace-write`. **`workspace-write` is currently broken on Windows** (missing `codex-windows-sandbox-setup.exe` helper — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-codex-cli-behavior)), so `codex` jobs are effectively read-only unless `skip_permissions=True` is also passed per-call, which maps to `--dangerously-bypass-approvals-and-sandbox` (the only flag confirmed to actually apply edits headlessly). |
+| `CADET_CODEX_SANDBOX` | `true` | Whether `sandbox=True` maps to `-s read-only` (the safe default) vs `-s workspace-write`, run inside the container alongside the container's own isolation. Whether `workspace-write`'s Windows-specific breakage (missing `codex-windows-sandbox-setup.exe` helper — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-codex-cli-behavior)) still applies on Linux is unconfirmed — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-codex-container-behavior). Until confirmed, treat `codex` jobs as effectively read-only unless `skip_permissions=True` is also passed per-call (maps to `--dangerously-bypass-approvals-and-sandbox`). |
 
 ### `cursor` provider env vars
 
@@ -56,13 +64,15 @@ Env vars only, no config file — mirrors SALTMDB's own established precedent
 | `CADET_COPILOT_EFFORT` | none (no effort applied) | Passed through as `copilot --effort <value>` unless overridden per-call. One of `none`\|`minimal`\|`low`\|`medium`\|`high`\|`xhigh`\|`max`. **Confirmed to hard-error when combined with `model="auto"`** (`Error: Model "auto" does not support reasoning effort configuration...`) — pair with a real `CADET_COPILOT_MODEL`/`model` if setting this. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
 | `CADET_COPILOT_SANDBOX` | `true` | Whether `sandbox=True` (with `skip_permissions=False`) maps to `--mode plan` (genuinely read-only, confirmed) vs. omitting `--mode` entirely. **Unlike `codex`/`cursor`, `sandbox=False` with `skip_permissions=False` is not a known-broken combo here** — it behaves identically to `skip_permissions=True` (real edits) because `--allow-all-tools` is always passed (required for non-interactive mode to function at all) and `--mode plan`'s presence/absence is the only actual write gate. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
 
-### Other providers (planned)
+### Provider status summary
 
-`agy`, `codex`, `cursor`, and `copilot` are all the providers CADET currently supports, each with
-real env vars wired up following the exact same pattern above. A provider with no `_PATH` set
-simply isn't offered — `delegate_task(provider=...)` for it returns a clean `{"error": ...}` rather
-than the server failing to start (unlike `agy`, whose `CADET_AGY_DOCKER_IMAGE` resolution stays
-required/fail-fast at startup for backward compatibility with the original single-provider design).
+`agy`, `codex`, `cursor`, and `copilot` are all the providers CADET currently supports. `agy` and
+`codex` are containerized (Docker image resolution, required/fail-fast at startup for `agy`, same
+strictness not yet applied to `codex` — an unbuilt `cadet-codex:latest` just leaves `codex` out of
+`delegate_task`'s available providers rather than blocking server startup, same posture as the
+still-native `cursor`/`copilot`). `cursor` and `copilot` remain native host-binary providers — a
+provider with no `_PATH`/`_DOCKER_IMAGE` resolvable simply isn't offered, and requesting it returns a
+clean `{"error": ...}` rather than the server failing to start.
 
 ## Setup step: `cadet-install-agy-permissions`
 
@@ -122,6 +132,23 @@ This prints a Google OAuth URL; visit it, approve, and paste the resulting autho
 into the same terminal. The result is written into the same named volume, so it persists for every
 subsequent containerized job — this is a one-time step per volume, not per job.
 
+## Setup step: `cadet-setup-codex-docker`
+
+A manual, one-time console script (`src/cadet/process/codex_docker_setup.py`, registered in
+`pyproject.toml`) that seeds the `CADET_CODEX_AUTH_VOLUME` Docker volume from the host's
+`~/.codex/auth.json` — just the one file (unlike `agy`'s four), since `config.toml` was confirmed
+unnecessary for auth+basic exec (see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-codex-container-behavior)).
+Always overwrites on re-run, same reasoning as `cadet-setup-agy-docker`.
+
+```
+cadet-setup-codex-docker          # seeds/reseeds the volume, reports what was copied
+cadet-setup-codex-docker --check  # reports which files are present without writing; exit 1 if any missing
+```
+
+**Unlike `agy`, this alone IS sufficient for authentication** — codex's Windows `auth.json` is
+directly portable to the Linux container, confirmed via a real successful model call with zero
+interactive login step. No follow-up `docker run -it ... codex ...` login dance is needed.
+
 ## Companion script: `cadet-wait-for-job`
 
 A console script (`pyproject.toml`'s `[project.scripts]`) that blocks/polls in-process
@@ -146,14 +173,17 @@ deliberately kept below Bash's own 600s `run_in_background` timeout ceiling, sin
 single invocation cannot safely promise to wait out a job's full possible
 `CADET_MAX_TIMEOUT_S` (up to 7200s).
 
-## `CADET_AGY_DOCKER_IMAGE` must already be built
+## `CADET_AGY_DOCKER_IMAGE`/`CADET_CODEX_DOCKER_IMAGE` must already be built
 
 Unlike a host binary lookup, there's no `PATH`-resolution gotcha here — but the equivalent fail-fast
-contract still applies. CADET resolves `CADET_AGY_DOCKER_IMAGE` once at startup via `docker image
-inspect` and **fails fast with a clear error** (not a silent no-op) if Docker isn't reachable or the
-image hasn't been built (`docker build -t cadet-agy:latest docker/agy/`), rather than deferring the
-failure to the first `delegate_task` call. This replaces the old `CADET_AGY_PATH` requirement — see
-[ARCHITECTURE.md](./ARCHITECTURE.md#containerized-agy-execution).
+contract still applies. CADET resolves each containerized provider's image once via `docker image
+inspect` (`config._resolve_docker_image`, shared by both `agy` and `codex`) and **fails fast with a
+clear error** (not a silent no-op) if Docker isn't reachable or the image hasn't been built
+(`docker build -t cadet-agy:latest docker/agy/` / `docker build -t cadet-codex:latest docker/codex/`).
+For `agy` this check is required/fail-fast at server startup (`__main__.py`); for `codex` it's
+checked the same way but only blocks that one provider from being offered, not the whole server —
+see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-agy-execution) and
+[ARCHITECTURE.md](./ARCHITECTURE.md#containerized-codex-execution).
 
 ## Directory layout
 

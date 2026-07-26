@@ -13,13 +13,16 @@ JOB_ID = "job-abc123def456"
 
 class TestContainerNameForJob(unittest.TestCase):
     def test_deterministic_and_docker_name_safe(self):
-        name = container_name_for_job(JOB_ID)
+        name = container_name_for_job("agy", JOB_ID)
         self.assertEqual(name, "cadet-agy-job-abc123def456")
         # Docker container names must match ^[a-zA-Z0-9][a-zA-Z0-9_.-]+$
         self.assertRegex(name, r"^[a-zA-Z0-9][a-zA-Z0-9_.-]+$")
 
     def test_different_job_ids_produce_different_names(self):
-        self.assertNotEqual(container_name_for_job("job-aaa"), container_name_for_job("job-bbb"))
+        self.assertNotEqual(container_name_for_job("agy", "job-aaa"), container_name_for_job("agy", "job-bbb"))
+
+    def test_different_providers_produce_different_names_for_same_job_id(self):
+        self.assertNotEqual(container_name_for_job("agy", JOB_ID), container_name_for_job("codex", JOB_ID))
 
 
 @patch.dict(os.environ, {}, clear=True)

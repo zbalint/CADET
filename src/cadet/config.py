@@ -89,15 +89,36 @@ def get_agy_stop_grace_s() -> int:
     return int(os.environ.get("CADET_AGY_STOP_GRACE_S", "10"))
 
 
-def resolve_agy_docker_image() -> str:
-    """Resolve and validate the agy provider's containerized execution target.
-    Replaces the old resolve_agy_path() (host CADET_AGY_PATH binary lookup) —
-    agy now runs exclusively inside a Docker container (see
-    docs/ARCHITECTURE.md's "Containerized agy execution" section), so the
-    equivalent fail-fast check is "is Docker reachable and is the image
-    built" rather than "does this exe file exist". Fails fast (raises) at
-    server bootstrap rather than deferring to the first delegate_task call."""
-    image = get_agy_docker_image()
+def get_codex_docker_image() -> str:
+    return os.environ.get("CADET_CODEX_DOCKER_IMAGE", "cadet-codex:latest")
+
+
+def get_codex_auth_volume() -> str:
+    return os.environ.get("CADET_CODEX_AUTH_VOLUME", "cadet-codex-auth")
+
+
+def get_codex_container_memory() -> str:
+    return os.environ.get("CADET_CODEX_CONTAINER_MEMORY", "2g")
+
+
+def get_codex_container_cpus() -> str:
+    return os.environ.get("CADET_CODEX_CONTAINER_CPUS", "2")
+
+
+def get_codex_container_pids_limit() -> int:
+    return int(os.environ.get("CADET_CODEX_CONTAINER_PIDS_LIMIT", "512"))
+
+
+def get_codex_stop_grace_s() -> int:
+    return int(os.environ.get("CADET_CODEX_STOP_GRACE_S", "10"))
+
+
+def _resolve_docker_image(image: str, build_hint: str) -> str:
+    """Shared fail-fast check for any containerized provider: "is Docker
+    reachable and is the image built" rather than "does this exe file
+    exist". Called at server bootstrap rather than deferring to the first
+    delegate_task call. `build_hint` is the docker/<provider>/ dir to point
+    the user at when the image is missing."""
     try:
         result = subprocess.run(
             ["docker", "image", "inspect", image], capture_output=True, text=True, timeout=10,
@@ -108,16 +129,33 @@ def resolve_agy_docker_image() -> str:
         raise RuntimeError("Docker CLI timed out — is Docker Desktop running?")
     if result.returncode != 0:
         raise RuntimeError(
-            f"Docker image {image!r} not found locally. Build it: docker build -t {image} docker/agy/"
+            f"Docker image {image!r} not found locally. Build it: docker build -t {image} {build_hint}"
         )
     return image
 
 
+def resolve_agy_docker_image() -> str:
+    """Resolve and validate the agy provider's containerized execution target.
+    Replaces the old resolve_agy_path() (host CADET_AGY_PATH binary lookup) —
+    agy now runs exclusively inside a Docker container (see
+    docs/ARCHITECTURE.md's "Containerized agy execution" section)."""
+    return _resolve_docker_image(get_agy_docker_image(), "docker/agy/")
+
+
+def resolve_codex_docker_image() -> str:
+    """Resolve and validate the codex provider's containerized execution
+    target. Mirrors resolve_agy_docker_image — codex also runs exclusively
+    inside a Docker container now (Phase 3), replacing the old
+    CADET_CODEX_PATH host-binary lookup."""
+    return _resolve_docker_image(get_codex_docker_image(), "docker/codex/")
+
+
 # --- Provider-generic resolution -------------------------------------------
-# Only "agy" is a real provider today; the functions below are already
-# generalized so a later provider only needs to add its own env vars, not
-# touch this dispatch shape. "agy" is special-cased to keep the legacy
-# CADET_AGY_* env var names intact for backward compatibility.
+# "agy" and "codex" are containerized (Docker image resolution); "cursor" and
+# "copilot" are still native host-binary providers (CADET_{PROVIDER}_PATH).
+# Both are special-cased here to keep their legacy env var names intact for
+# backward compatibility — a provider only needs to add its own branch here
+# when it graduates from native to containerized, not a re-architecture.
 
 def _env_prefix(provider: str) -> str:
     return f"CADET_{provider.upper()}"
@@ -130,6 +168,8 @@ def resolve_provider_path(provider: str) -> str:
     propagate."""
     if provider == "agy":
         return resolve_agy_docker_image()
+    if provider == "codex":
+        return resolve_codex_docker_image()
     env_var = f"{_env_prefix(provider)}_PATH"
     path = os.environ.get(env_var)
     if not path:
