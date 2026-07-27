@@ -116,9 +116,11 @@ no dual native/container mode for `agy`. `codex`/`cursor`/`copilot` are untouche
   cheap, idempotent defensive fallback. All three of `dispatcher.py`'s kill-call-sites (lost
   `mark_running` race, timeout, `cancel`) and `reconcile.py`'s startup-reconciliation loop are
   provider-aware: `agy` always calls `stop_container` (unconditionally for reconcile — no PID
-  liveness pre-check needed, since stopping an already-gone container is itself a tolerated no-op),
-  while `codex`/`cursor`/`copilot` are completely unchanged, still going through the original
-  PID-based `kill_process_tree` path.
+  liveness pre-check needed, since stopping an already-gone container is itself a tolerated no-op).
+  At this point in the rollout (Phase 2), `codex`/`cursor`/`copilot` were completely unchanged,
+  still going through the original PID-based `kill_process_tree` path — `codex` (Phase 3) and
+  `cursor` (Phase 4) have since gained their own `stop_container` paths too, see their respective
+  sections below; only `copilot` still uses `kill_process_tree` as of this writing.
 - **Bootstrap**: `config.resolve_agy_docker_image()` replaces the old `resolve_agy_path()` — the
   fail-fast check at server startup is now "is Docker reachable and is `cadet-agy:latest` built"
   (`docker image inspect`) rather than "does a host `agy.exe` exist." `CADET_AGY_PATH` is retired.
@@ -174,6 +176,76 @@ this change.
   real testing; not yet fixed in `treekill.stop_container` (a candidate fix is an unconditional
   `docker rm -f` after `docker stop`, not yet implemented). Low real-world likelihood, not blocking.
 
+## Containerized `cursor` execution
+
+Phase 4: the same containerization decision made for `agy` and `codex` (see above), applied to
+`cursor` — replaces `cursor`'s native Windows subprocess execution (the `powershell.exe -File
+cursor-agent.ps1` workaround, see "Validated `cursor` CLI behavior" below) entirely — no dual mode.
+`copilot` is untouched by this change, the last remaining native provider.
+
+- **Image**: `docker/cursor/Dockerfile` — same minimal `debian:bookworm-slim` + `git` +
+  `python3`/`pip3` base as `agy`/`codex`'s images. Installs via the official Linux installer
+  (`curl https://cursor.com/install -fsS | bash`), which places the binary at
+  `~/.local/bin/agent` — **named `agent`, not `cursor-agent`**, despite the product being called
+  "Cursor Agent CLI" (confirmed via official docs; already flagged as a known gotcha in
+  `providers/cursor.py`'s pre-Phase-4 module docstring). Built/tagged locally as
+  `cadet-cursor:latest` (`docker build -t cadet-cursor:latest docker/cursor/`) — no registry,
+  single machine only.
+- **Auth**: a dedicated Docker named volume (`cadet-cursor-auth`, see `CADET_CURSOR_AUTH_VOLUME` in
+  [CONFIGURATION.md](./CONFIGURATION.md)), same shape as `agy`'s Phase 2 — **not** the
+  `CURSOR_API_KEY`-only design originally planned before live testing. **Critical finding, confirmed
+  via a full-home-directory capture during a real login**: cursor-agent's Linux build stores its
+  actual session credential (`auth.json`) under the XDG config dir `~/.config/cursor/`, a completely
+  different location than the Windows install's `~/.cursor/` (which holds only non-secret settings,
+  `cli-config.json`) — same "different OS, different credential file" situation `agy`'s Phase 2 hit.
+  No cross-platform credential copy is possible; a one-time interactive OAuth login (`docker run
+  --rm -v cadet-cursor-auth:/root/.config/cursor -e NO_OPEN_BROWSER=1 cadet-cursor:latest agent
+  login` — prints a `cursor.com/loginDeepControl?...` URL to open in a browser, blocks until that
+  flow completes) must be done once against this volume before any headless job can authenticate.
+  Unlike `agy`'s documented flow, **no `-it`/TTY is actually required** — confirmed empirically via
+  a plain background subprocess. `src/cadet/process/cursor_docker_setup.py`
+  (`cadet-setup-cursor-docker` console script) wraps this login and a `--check` mode (a real `agent
+  status` call, not just file-presence checking). `CURSOR_API_KEY` (`CADET_CURSOR_API_KEY`) is still
+  forwarded via `-e` when set — the vendor CLI accepts both — but it's optional now, not required;
+  `build_docker_argv` no longer fails fast if it's unset.
+- **The Windows-host-building-Linux-argv bug**: `build_docker_argv` executes on the Windows host
+  (constructing the `docker run ...` argv), but the *inner* `agent ...` invocation it builds always
+  targets the Linux container, regardless of what `sys.platform` reports on the host process.
+  `cursor.py`'s pre-existing `build_argv` has an `if sys.platform == "win32":` branch (wraps the
+  invocation in `powershell.exe -File` — see "Validated `cursor` CLI behavior" below) that would
+  incorrectly fire here if reused unchanged. Fixed by adding a `container: bool = False` keyword
+  param to `build_argv`: when `True`, the win32 check is skipped unconditionally and the bare Linux
+  shape (`[cursor_path] + cli_args`) is always returned. Default `False` preserves every existing
+  native call site and its tests unchanged; `build_docker_argv` is the only caller that passes
+  `container=True`.
+- **Invocation**: `build_docker_argv` wraps the inner `build_argv(..., container=True)` call inside
+  `docker run --rm --name <container>`, with `-v <cwd>:/workspace{:ro or :rw} -w /workspace`, the
+  `-v cadet-cursor-auth:/root/.config/cursor` mount above (plus `-e CURSOR_API_KEY=...` when set),
+  the same resource-limit and hardening flags as `agy`/`codex`'s containers (`--memory`, `--cpus`,
+  `--pids-limit`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`), no `--network none` (cursor
+  needs outbound HTTPS to Cursor's API). The `/workspace` mount is `:ro` when `sandbox=True and not
+  skip_permissions`, `:rw` otherwise — same defense-in-depth pattern as `codex`'s Phase 3. Whether
+  cursor-agent's own `--mode plan`/`--trust --force` argv-level semantics (originally validated on
+  native Windows only, see "Validated `cursor` CLI behavior" below) behave identically inside this
+  Linux container is now **confirmed** — two real live calls (a read-only Q&A call and a real
+  file-write call) both succeeded against the OAuth-authenticated volume before this was wired into
+  CADET. The bind mount still enforces the read-only/read-write distinction at the kernel VFS level
+  as defense-in-depth, independent of the CLI-level flags. Container name is deterministic
+  (`cadet-cursor-<job_id>`), via the same `launcher.container_name_for_job(provider, job_id)`
+  agy/codex use.
+- **Stop/cancel/reconcile**: identical shape to `agy`/`codex`'s — the recorded `pid` is the
+  `docker run` client's, not the container's own lifetime. `providers/cursor.py`'s `stop(job_id,
+  pid)` mirrors `providers/codex.py`'s `stop` exactly. `dispatcher.py`'s `_CONTAINERIZED_PROVIDERS`
+  and `_stop_fns()`, and `reconcile.py`'s startup loop, all now treat `agy`, `codex`, and `cursor`
+  identically (`provider_name in ("agy", "codex", "cursor")`).
+- **Bootstrap**: `config.resolve_cursor_docker_image()` mirrors `resolve_agy_docker_image()`/
+  `resolve_codex_docker_image()` (all three now share the `_resolve_docker_image(image,
+  build_hint)` helper) — `CADET_CURSOR_PATH` (host binary path) is retired in favor of Docker image
+  resolution.
+- **Known open issue (not `cursor`-specific — also affects `agy`/`codex`)**: the same fast-cancel
+  orphaned-`Created`-container race described in "Containerized `codex` execution" above applies
+  here too — not yet fixed in `treekill.stop_container`.
+
 ## The `context_id` thread
 
 `context_id` is the single correlation key connecting all three systems:
@@ -199,14 +271,14 @@ and control over jobs CADET already runs, not a second way to submit work.
 
 ## Non-goals
 
-- **No sandboxing mechanism built *by* CADET for `codex`/`cursor`/`copilot`** — for these three
-  providers, CADET still only enables the vendor's own native sandbox flag where one exists (see
-  their respective "Validated ... CLI behavior" sections below), and every one of those flags has
-  been found broken or trivially bypassable on Windows. `agy` is the one exception: as of
-  "Containerized `agy` execution" below, CADET now provides its own real containment (a Docker
-  container) for `agy` specifically, superseding reliance on `agy`'s own (also broken-on-Windows)
-  `--sandbox`/AppContainer mechanism. Extending containerized execution to the other 3 providers is
-  a plausible future phase, not yet done.
+- **No sandboxing mechanism built *by* CADET for `copilot`** — this remaining native provider still
+  only gets whatever vendor-native sandbox flag it exposes (see its "Validated ... CLI behavior"
+  section below), unvalidated territory the same way `codex`/`cursor` were before their own
+  containerization phases. `agy`, `codex`, and `cursor` are now containerized (see their respective
+  "Containerized ... execution" sections above): CADET provides its own real containment (a Docker
+  container) for each, superseding reliance on their own native (and, on Windows, broken or
+  bypassable) sandbox mechanisms. Extending containerized execution to `copilot` is a plausible
+  future phase, not yet done.
 - No support for multiple CADET server instances sharing one `CADET_STATE_DIR` — undefined,
   documented as an assumption rather than engineered around.
 - No direct CADET↔SALTMDB integration — that connection is entirely `agy`'s and Claude's own

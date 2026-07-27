@@ -35,6 +35,14 @@ _ENV_VARS = [
     "CADET_CODEX_CONTAINER_PIDS_LIMIT",
     "CADET_CODEX_STOP_GRACE_S",
     "CADET_CURSOR_PATH",
+    "CADET_CURSOR_DOCKER_IMAGE",
+    "CADET_CURSOR_API_KEY",
+    "CADET_CURSOR_AUTH_VOLUME",
+    "CADET_CURSOR_CONTAINER_MEMORY",
+    "CADET_CURSOR_CONTAINER_CPUS",
+    "CADET_CURSOR_CONTAINER_PIDS_LIMIT",
+    "CADET_CURSOR_STOP_GRACE_S",
+    "CADET_COPILOT_PATH",
     "CADET_WEB_HOST",
     "CADET_WEB_PORT",
     "CADET_WEB_ENABLED",
@@ -230,6 +238,63 @@ class TestResolveCodexDockerImage(ConfigTestCase):
         self.assertEqual(mock_run.call_args[0][0], ["docker", "image", "inspect", "custom-codex:v2"])
 
 
+class TestCursorDockerGetters(ConfigTestCase):
+    def test_defaults(self):
+        self.assertEqual(config.get_cursor_docker_image(), "cadet-cursor:latest")
+        self.assertIsNone(config.get_cursor_api_key())
+        self.assertEqual(config.get_cursor_auth_volume(), "cadet-cursor-auth")
+        self.assertEqual(config.get_cursor_container_memory(), "2g")
+        self.assertEqual(config.get_cursor_container_cpus(), "2")
+        self.assertEqual(config.get_cursor_container_pids_limit(), 512)
+        self.assertEqual(config.get_cursor_stop_grace_s(), 10)
+
+    def test_overrides(self):
+        os.environ["CADET_CURSOR_DOCKER_IMAGE"] = "custom-cursor:v2"
+        os.environ["CADET_CURSOR_API_KEY"] = "test-key-abc"
+        os.environ["CADET_CURSOR_AUTH_VOLUME"] = "custom-cursor-auth"
+        os.environ["CADET_CURSOR_CONTAINER_MEMORY"] = "4g"
+        os.environ["CADET_CURSOR_CONTAINER_CPUS"] = "4"
+        os.environ["CADET_CURSOR_CONTAINER_PIDS_LIMIT"] = "1024"
+        os.environ["CADET_CURSOR_STOP_GRACE_S"] = "30"
+
+        self.assertEqual(config.get_cursor_docker_image(), "custom-cursor:v2")
+        self.assertEqual(config.get_cursor_api_key(), "test-key-abc")
+        self.assertEqual(config.get_cursor_auth_volume(), "custom-cursor-auth")
+        self.assertEqual(config.get_cursor_container_memory(), "4g")
+        self.assertEqual(config.get_cursor_container_cpus(), "4")
+        self.assertEqual(config.get_cursor_container_pids_limit(), 1024)
+        self.assertEqual(config.get_cursor_stop_grace_s(), 30)
+
+
+class TestResolveCursorDockerImage(ConfigTestCase):
+    def test_image_found_resolves(self):
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as mock_run:
+            self.assertEqual(config.resolve_cursor_docker_image(), "cadet-cursor:latest")
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args[0][0], ["docker", "image", "inspect", "cadet-cursor:latest"])
+
+    def test_image_not_found_raises(self):
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr="no such image")):
+            with self.assertRaises(RuntimeError):
+                config.resolve_cursor_docker_image()
+
+    def test_docker_cli_missing_raises(self):
+        with patch("cadet.config.subprocess.run", side_effect=FileNotFoundError()):
+            with self.assertRaises(RuntimeError):
+                config.resolve_cursor_docker_image()
+
+    def test_docker_daemon_unreachable_raises(self):
+        with patch("cadet.config.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=10)):
+            with self.assertRaises(RuntimeError):
+                config.resolve_cursor_docker_image()
+
+    def test_respects_image_env_override(self):
+        os.environ["CADET_CURSOR_DOCKER_IMAGE"] = "custom-cursor:v2"
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as mock_run:
+            self.assertEqual(config.resolve_cursor_docker_image(), "custom-cursor:v2")
+        self.assertEqual(mock_run.call_args[0][0], ["docker", "image", "inspect", "custom-cursor:v2"])
+
+
 class TestAgySettingsPath(ConfigTestCase):
     def test_defaults_to_gemini_antigravity_cli_settings(self):
         self.assertEqual(
@@ -252,21 +317,25 @@ class TestProviderGenericResolution(ConfigTestCase):
         with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
             self.assertEqual(config.resolve_provider_path("codex"), "cadet-codex:latest")
 
+    def test_resolve_provider_path_cursor_delegates_to_resolve_cursor_docker_image(self):
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
+            self.assertEqual(config.resolve_provider_path("cursor"), "cadet-cursor:latest")
+
     def test_resolve_provider_path_other_provider_uses_prefixed_env_var(self):
-        fake_cursor = os.path.join(self.temp_dir, "cursor-agent.ps1")
-        with open(fake_cursor, "w") as f:
+        fake_copilot = os.path.join(self.temp_dir, "copilot.cmd")
+        with open(fake_copilot, "w") as f:
             f.write("")
-        os.environ["CADET_CURSOR_PATH"] = fake_cursor
-        self.assertEqual(config.resolve_provider_path("cursor"), fake_cursor)
+        os.environ["CADET_COPILOT_PATH"] = fake_copilot
+        self.assertEqual(config.resolve_provider_path("copilot"), fake_copilot)
 
     def test_resolve_provider_path_missing_raises(self):
         with self.assertRaises(RuntimeError):
-            config.resolve_provider_path("cursor")
+            config.resolve_provider_path("copilot")
 
     def test_resolve_provider_path_nonexistent_file_raises(self):
-        os.environ["CADET_CURSOR_PATH"] = os.path.join(self.temp_dir, "does_not_exist.ps1")
+        os.environ["CADET_COPILOT_PATH"] = os.path.join(self.temp_dir, "does_not_exist.cmd")
         with self.assertRaises(RuntimeError):
-            config.resolve_provider_path("cursor")
+            config.resolve_provider_path("copilot")
 
     def test_get_provider_model_effort_sandbox_agy_matches_legacy_getters(self):
         os.environ["CADET_AGY_MODEL"] = "gemini-3.6-flash-medium"

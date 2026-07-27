@@ -47,12 +47,22 @@ retired, replaced by Docker image resolution, same shape as `agy`'s.
 
 ### `cursor` provider env vars
 
+`cursor` is containerized (Phase 4, mirrors `codex`) — `CADET_CURSOR_PATH` (host binary path) is
+retired, replaced by Docker image resolution. Auth is a Docker named volume (OAuth login, same
+shape as `agy`'s Phase 2), not a plain API key — see `cadet-setup-cursor-docker` below.
+
 | Var | Default | Purpose |
 |---|---|---|
-| `CADET_CURSOR_PATH` | none — provider unavailable if unset | Absolute path to `cursor-agent.ps1` (e.g. `C:\Users\<user>\AppData\Local\cursor-agent\cursor-agent.ps1`) — **not** `cursor-agent.cmd`. `providers/cursor.py` invokes it via `powershell.exe -File` directly; pointing at the `.cmd` instead routes through `cmd.exe`, which corrupts CADET's own rendered prompt (see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior)). Not required at server startup — if unset, `cursor` just isn't in `delegate_task`'s available providers and requesting it returns a clean `{"error": ...}`. |
-| `CADET_CURSOR_MODEL` | `auto` | Passed through as `cursor-agent --model` unless overridden per-call by `delegate_task`'s `model` param. **Always passed explicitly** (never omitted) — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior) for why omitting `--model` is unsafe (it inherits a sticky global default from `~/.cursor/cli-config.json` instead of a stateless vendor default). Free-tier accounts can only use `auto`; named models require a paid plan. |
+| `CADET_CURSOR_DOCKER_IMAGE` | `cadet-cursor:latest` | Docker image tag `cursor` jobs run inside (see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-cursor-execution)). Must already be built (`docker build -t <image> docker/cursor/`) — resolved and validated (`docker image inspect`) at server startup. |
+| `CADET_CURSOR_AUTH_VOLUME` | `cadet-cursor-auth` | Docker named volume mounted at `/root/.config/cursor` inside the container, holding the containerized `cursor`'s own session credential (`auth.json`) — **not** `/root/.cursor` (the Windows install's config dir; Linux stores auth under the XDG config dir instead). See `cadet-setup-cursor-docker` below for the one-time OAuth login needed to populate it — no cross-platform credential copy from the Windows host is possible. |
+| `CADET_CURSOR_API_KEY` | none (optional) | Alternative/additional auth, forwarded into the container as `CURSOR_API_KEY` (`docker run -e`) when set. Generate one from the Cursor dashboard (Integrations > User API Keys) if you'd rather not do the OAuth login. Not required — the auth volume above is the primary mechanism. |
+| `CADET_CURSOR_CONTAINER_MEMORY` | `2g` | `docker run --memory` limit for `cursor` containers. |
+| `CADET_CURSOR_CONTAINER_CPUS` | `2` | `docker run --cpus` limit for `cursor` containers. |
+| `CADET_CURSOR_CONTAINER_PIDS_LIMIT` | `512` | `docker run --pids-limit` for `cursor` containers. |
+| `CADET_CURSOR_STOP_GRACE_S` | `10` | Grace period (`docker stop --timeout`) given to a container before it's force-killed, on job timeout/cancel/startup-reconciliation. |
+| `CADET_CURSOR_MODEL` | `auto` | Passed through as `agent --model` unless overridden per-call by `delegate_task`'s `model` param. **Always passed explicitly** (never omitted) — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior) for why omitting `--model` is unsafe (it inherits a sticky global default from `~/.cursor/cli-config.json` instead of a stateless vendor default). Free-tier accounts can only use `auto`; named models require a paid plan. |
 | `CADET_CURSOR_EFFORT` | none (no effort applied) | Applied as a bracket override on the model string (`<model>[effort=<value>]`) only when a model is also set. **UNCONFIRMED** against a real call — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior). |
-| `CADET_CURSOR_SANDBOX` | `true` | Whether `sandbox=True` maps to `--mode plan` (genuinely read-only, confirmed) vs. omitting `--mode` entirely. **The `sandbox=False` + `skip_permissions=False` combo does not reliably apply edits on this platform** (no TTY to approve the tool call, despite an exit-0 success claim) — pass `skip_permissions=True` (maps to `--force`, paired with the always-on `--trust`) for real edits instead. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior). |
+| `CADET_CURSOR_SANDBOX` | `true` | Whether `sandbox=True` maps to `--mode plan` (genuinely read-only on Windows, confirmed — **unconfirmed inside the Linux container**, see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-cursor-execution)) vs. omitting `--mode` entirely. The `/workspace` bind mount's `:ro`/`:rw` distinction backs the read-only/read-write semantics regardless of what the CLI flag itself does. |
 
 ### `copilot` provider env vars
 
@@ -149,6 +159,28 @@ cadet-setup-codex-docker --check  # reports which files are present without writ
 directly portable to the Linux container, confirmed via a real successful model call with zero
 interactive login step. No follow-up `docker run -it ... codex ...` login dance is needed.
 
+## Setup step: `cadet-setup-cursor-docker`
+
+A manual console script (`src/cadet/process/cursor_docker_setup.py`, registered in
+`pyproject.toml`) that runs a one-time OAuth login against the `CADET_CURSOR_AUTH_VOLUME` Docker
+volume — **more like `agy`'s two-step dance than `codex`'s single-file copy**, since there is no
+host file to seed at all: cursor-agent's Linux build stores its session credential (`auth.json`)
+under the XDG config dir `~/.config/cursor/`, a completely different location than the Windows
+install's `~/.cursor/` (confirmed empirically via a full-home-directory capture during a real
+login) — no cross-platform copy is possible.
+
+```
+cadet-setup-cursor-docker          # creates the volume if needed and runs `agent login` against it
+cadet-setup-cursor-docker --check  # reports current login status via a real `agent status` call, no write
+```
+
+Running the plain (no `--check`) form prints a `cursor.com/loginDeepControl?...` URL — open it in a
+browser and approve. Unlike `agy`'s documented `-it`/TTY requirement, **no TTY is actually needed
+here** — confirmed empirically; the underlying `docker run --rm -v cadet-cursor-auth:/root/.config/
+cursor -e NO_OPEN_BROWSER=1 cadet-cursor:latest agent login` blocks in the foreground until the
+browser flow completes, then exits 0. This is a one-time step per volume, not per job — the result
+persists in the named volume for every subsequent containerized `cursor` job.
+
 ## Companion script: `cadet-wait-for-job`
 
 A console script (`pyproject.toml`'s `[project.scripts]`) that blocks/polls in-process
@@ -173,17 +205,19 @@ deliberately kept below Bash's own 600s `run_in_background` timeout ceiling, sin
 single invocation cannot safely promise to wait out a job's full possible
 `CADET_MAX_TIMEOUT_S` (up to 7200s).
 
-## `CADET_AGY_DOCKER_IMAGE`/`CADET_CODEX_DOCKER_IMAGE` must already be built
+## `CADET_AGY_DOCKER_IMAGE`/`CADET_CODEX_DOCKER_IMAGE`/`CADET_CURSOR_DOCKER_IMAGE` must already be built
 
 Unlike a host binary lookup, there's no `PATH`-resolution gotcha here — but the equivalent fail-fast
 contract still applies. CADET resolves each containerized provider's image once via `docker image
-inspect` (`config._resolve_docker_image`, shared by both `agy` and `codex`) and **fails fast with a
-clear error** (not a silent no-op) if Docker isn't reachable or the image hasn't been built
-(`docker build -t cadet-agy:latest docker/agy/` / `docker build -t cadet-codex:latest docker/codex/`).
-For `agy` this check is required/fail-fast at server startup (`__main__.py`); for `codex` it's
-checked the same way but only blocks that one provider from being offered, not the whole server —
-see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-agy-execution) and
-[ARCHITECTURE.md](./ARCHITECTURE.md#containerized-codex-execution).
+inspect` (`config._resolve_docker_image`, shared by `agy`, `codex`, and `cursor`) and **fails fast
+with a clear error** (not a silent no-op) if Docker isn't reachable or the image hasn't been built
+(`docker build -t cadet-agy:latest docker/agy/` / `docker build -t cadet-codex:latest docker/codex/`
+/ `docker build -t cadet-cursor:latest docker/cursor/`).
+For `agy` this check is required/fail-fast at server startup (`__main__.py`); for `codex`/`cursor`
+it's checked the same way but only blocks that one provider from being offered, not the whole
+server — see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-agy-execution),
+[ARCHITECTURE.md](./ARCHITECTURE.md#containerized-codex-execution), and
+[ARCHITECTURE.md](./ARCHITECTURE.md#containerized-cursor-execution).
 
 ## Directory layout
 

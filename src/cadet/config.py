@@ -113,6 +113,34 @@ def get_codex_stop_grace_s() -> int:
     return int(os.environ.get("CADET_CODEX_STOP_GRACE_S", "10"))
 
 
+def get_cursor_docker_image() -> str:
+    return os.environ.get("CADET_CURSOR_DOCKER_IMAGE", "cadet-cursor:latest")
+
+
+def get_cursor_api_key():
+    return os.environ.get("CADET_CURSOR_API_KEY") or None
+
+
+def get_cursor_auth_volume() -> str:
+    return os.environ.get("CADET_CURSOR_AUTH_VOLUME", "cadet-cursor-auth")
+
+
+def get_cursor_container_memory() -> str:
+    return os.environ.get("CADET_CURSOR_CONTAINER_MEMORY", "2g")
+
+
+def get_cursor_container_cpus() -> str:
+    return os.environ.get("CADET_CURSOR_CONTAINER_CPUS", "2")
+
+
+def get_cursor_container_pids_limit() -> int:
+    return int(os.environ.get("CADET_CURSOR_CONTAINER_PIDS_LIMIT", "512"))
+
+
+def get_cursor_stop_grace_s() -> int:
+    return int(os.environ.get("CADET_CURSOR_STOP_GRACE_S", "10"))
+
+
 def _resolve_docker_image(image: str, build_hint: str) -> str:
     """Shared fail-fast check for any containerized provider: "is Docker
     reachable and is the image built" rather than "does this exe file
@@ -150,10 +178,18 @@ def resolve_codex_docker_image() -> str:
     return _resolve_docker_image(get_codex_docker_image(), "docker/codex/")
 
 
+def resolve_cursor_docker_image() -> str:
+    """Resolve and validate the cursor provider's containerized execution
+    target. Mirrors resolve_agy_docker_image/resolve_codex_docker_image —
+    cursor also runs exclusively inside a Docker container now (Phase 4),
+    replacing the old CADET_CURSOR_PATH host-binary lookup."""
+    return _resolve_docker_image(get_cursor_docker_image(), "docker/cursor/")
+
+
 # --- Provider-generic resolution -------------------------------------------
-# "agy" and "codex" are containerized (Docker image resolution); "cursor" and
-# "copilot" are still native host-binary providers (CADET_{PROVIDER}_PATH).
-# Both are special-cased here to keep their legacy env var names intact for
+# "agy", "codex", and "cursor" are containerized (Docker image resolution);
+# "copilot" is still a native host-binary provider (CADET_{PROVIDER}_PATH).
+# Each is special-cased here to keep its legacy env var names intact for
 # backward compatibility — a provider only needs to add its own branch here
 # when it graduates from native to containerized, not a re-architecture.
 
@@ -170,6 +206,8 @@ def resolve_provider_path(provider: str) -> str:
         return resolve_agy_docker_image()
     if provider == "codex":
         return resolve_codex_docker_image()
+    if provider == "cursor":
+        return resolve_cursor_docker_image()
     env_var = f"{_env_prefix(provider)}_PATH"
     path = os.environ.get(env_var)
     if not path:

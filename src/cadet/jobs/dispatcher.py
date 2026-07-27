@@ -5,16 +5,16 @@ from cadet import config
 from cadet.db import job_store
 from cadet.process.providers.agy import spawn as spawn_agy, parse_error as parse_error_agy
 from cadet.process.providers.codex import spawn as spawn_codex, parse_error as parse_error_codex, stop as stop_codex_container
-from cadet.process.providers.cursor import spawn as spawn_cursor, parse_error as parse_error_cursor
+from cadet.process.providers.cursor import spawn as spawn_cursor, parse_error as parse_error_cursor, stop as stop_cursor_container
 from cadet.process.providers.copilot import spawn as spawn_copilot, parse_error as parse_error_copilot
 from cadet.process.launcher import stop_agy as stop_agy_container
 from cadet.process.treekill import kill_process_tree
 
 # Providers whose spawn() needs job_id to derive a deterministic container
-# name (see launcher.container_name_for_job) -- both are containerized
-# (Phase 2: agy, Phase 3: codex); cursor/copilot's spawn() signatures are
-# untouched and never receive it.
-_CONTAINERIZED_PROVIDERS = ("agy", "codex")
+# name (see launcher.container_name_for_job) -- all three are containerized
+# (Phase 2: agy, Phase 3: codex, Phase 4: cursor); copilot's spawn()
+# signature is untouched and never receives it.
+_CONTAINERIZED_PROVIDERS = ("agy", "codex", "cursor")
 
 # NOTE: dispatch dicts referencing spawn_agy/parse_error_agy are built fresh
 # inside run_job (not module scope) so that unittest.mock.patch(
@@ -73,7 +73,7 @@ class Dispatcher:
         return {
             "agy": lambda pid, jid: stop_agy_container(jid, pid),
             "codex": lambda pid, jid: stop_codex_container(jid, pid),
-            "cursor": lambda pid, jid: kill_process_tree(pid),
+            "cursor": lambda pid, jid: stop_cursor_container(jid, pid),
             "copilot": lambda pid, jid: kill_process_tree(pid),
         }
 

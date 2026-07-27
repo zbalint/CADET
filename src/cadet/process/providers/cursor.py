@@ -76,6 +76,34 @@ installed binary (`cursor-agent`, Windows, free-tier account):
 - No structured quota-exhaustion signal was found in vendor docs or during
   validation (this account never hit a real rate limit) — parse_error is
   best-effort only, same posture as codex's unconfirmed regex.
+
+Containerized 2026-07-27 (Phase 4, mirroring codex's Phase 3 pattern — see
+docs/ARCHITECTURE.md's "Containerized cursor execution" section). Fully
+replaces the native Windows powershell.exe path above — no dual mode, same
+decision already made for agy and codex:
+- The official Linux installer (`curl https://cursor.com/install -fsS |
+  bash`) places the binary at `~/.local/bin/agent` — **named `agent`, not
+  `cursor-agent`**, despite the product being called "Cursor Agent CLI".
+- **Auth: OAuth device-flow login into a dedicated Docker volume, same shape
+  as agy's Phase 2 — live-verified, not the CURSOR_API_KEY-only design
+  originally planned.** cursor-agent's Linux build stores its real session
+  credential (`auth.json`) under the XDG config dir `~/.config/cursor/`, a
+  completely different location than the Windows install's `~/.cursor/`
+  (confirmed via a full-home-directory capture during a real login) — no
+  cross-platform credential copy is possible, same "different OS, different
+  credential file" situation agy hit. A one-time `agent login` against the
+  `cadet-cursor-auth` volume (`CADET_CURSOR_AUTH_VOLUME`) is required before
+  any headless job can authenticate; see build_docker_argv's docstring for
+  the exact command. `CURSOR_API_KEY` is still forwarded when
+  `CADET_CURSOR_API_KEY` is set (the CLI supports both), but is now optional,
+  not required.
+- The `--mode plan` / `--trust --force` argv-level semantics validated above
+  (on native Windows) were **confirmed identical inside the Linux
+  container** via two real live calls (a read-only Q&A call and a real
+  file-write call, both against the OAuth-authenticated volume) before this
+  was wired into CADET. The `/workspace` bind mount's `:ro`/`:rw` distinction
+  still backs the read-only/read-write semantics as defense-in-depth,
+  kernel VFS enforcement, same reasoning as codex's Phase 3.
 """
 import asyncio
 import re
@@ -104,6 +132,7 @@ _DURATION_PATTERN = re.compile(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
 def build_argv(
     cursor_path: str, prompt_text: str, cwd: str, timeout_s: int,
     model=None, effort=None, skip_permissions=False, sandbox=True,
+    container: bool = False,
 ) -> list[str]:
     """Pure argv construction. `cursor-agent` has no CLI-level timeout flag —
     CADET's own asyncio.wait_for + kill_process_tree already enforces
@@ -115,7 +144,18 @@ def build_argv(
     routes through `cmd.exe`'s own line reparsing, which corrupts prompts
     containing `<`/`>`/`&`/`|`/`^` (CADET's rendered prompt template always
     contains a literal `<...>` placeholder). `-File` argument forwarding does
-    not re-interpret those characters."""
+    not re-interpret those characters.
+
+    `container=True` (Phase 4, used only by build_docker_argv below) always
+    skips the win32 wrapping branch and returns the bare Linux shape
+    (`[cursor_path] + cli_args`), regardless of what `sys.platform` reports —
+    this function still runs on the Windows host process that constructs the
+    `docker run` argv, but the *inner* `agent ...` invocation it's building
+    always targets the Linux container, never the host OS. Without this flag,
+    a Windows host would incorrectly wrap the containerized invocation in a
+    powershell.exe prefix that doesn't exist inside the container. Default
+    False keeps every existing (native, non-containerized) call site and its
+    tests unchanged."""
     model_arg = model or "auto"
     if effort:
         model_arg = f"{model_arg}[effort={effort}]"
@@ -133,25 +173,113 @@ def build_argv(
     # sandbox=False, skip_permissions=False falls through with neither flag:
     # confirmed non-functional on this platform (see module docstring) —
     # documented as a known caveat, not fixed here.
-    if sys.platform == "win32":
+    if not container and sys.platform == "win32":
         return [_WINDOWS_POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", cursor_path] + cli_args
     return [cursor_path] + cli_args
 
 
+def build_docker_argv(
+    image: str, prompt_text: str, cwd: str, timeout_s: int, job_id: str,
+    model=None, effort=None, skip_permissions=False, sandbox=True,
+) -> list[str]:
+    """Wraps the inner cursor invocation (build_argv, above, called with
+    container=True) in `docker run`. Mirrors codex.py's build_docker_argv
+    shape: --rm so a finished container never lingers; --name is
+    deterministic from job_id so stop() (treekill.stop_container) can target
+    it later. No --network none: cursor-agent needs outbound HTTPS to
+    Cursor's own API.
+
+    **Auth (live-verified 2026-07-27, OAuth device-flow login, same shape as
+    agy's Phase 2 — NOT the CURSOR_API_KEY approach originally planned)**:
+    `cadet-cursor-auth` (see CADET_CURSOR_AUTH_VOLUME) is a dedicated Docker
+    named volume mounted at `/root/.config/cursor` — critically **not**
+    `/root/.cursor` (the Windows install's config dir; confirmed empirically
+    via a full-home-directory capture during a real login that cursor-agent's
+    Linux build stores its actual session credential, `auth.json`, under the
+    XDG config dir `~/.config/cursor/`, entirely separate from
+    `~/.cursor/cli-config.json`, which holds non-secret settings only and is
+    not required for auth). No cross-platform credential copy is possible —
+    the Windows host's `~/.cursor` has no equivalent Linux XDG auth.json, so
+    (like agy, unlike codex) a one-time interactive OAuth login must be done
+    directly against this volume before any headless job can authenticate:
+    `docker run --rm -v cadet-cursor-auth:/root/.config/cursor -e
+    NO_OPEN_BROWSER=1 <image> agent login` — prints a `cursor.com/
+    loginDeepControl?...` URL, blocks until the browser flow completes (no
+    `-it`/TTY actually required, unlike agy's documented flow — confirmed
+    working via a plain background subprocess). A real headless call
+    (`agent -p "..." --print --mode plan`) and a real file-write call
+    (`agent -p "..." --print --trust --force`) were both confirmed working
+    end-to-end against this volume before this was wired up. `CURSOR_API_KEY`
+    (`config.get_cursor_api_key()`) is still forwarded via `-e` when set, as
+    an optional override the vendor CLI itself supports — but it is no
+    longer required; the auth volume is the primary mechanism now, and there
+    is no fail-fast RuntimeError on it being unset the way there was in the
+    initial (unverified) API-key-only design.
+
+    The `--mode plan` / `--trust --force` argv-level semantics (see
+    build_argv's docstring, originally validated on Windows only) are now
+    **confirmed identical inside this Linux container** via the live tests
+    above. The /workspace bind mount's :ro/:rw distinction still backs the
+    read-only/read-write semantics as defense-in-depth, same reasoning as
+    codex's Phase 3, even though the CLI-level flags are now known to work
+    correctly on their own too."""
+    from cadet import config
+    from cadet.process.launcher import container_name_for_job
+
+    name = container_name_for_job("cursor", job_id)
+    mount_suffix = ":ro" if (sandbox and not skip_permissions) else ""
+    argv = [
+        "docker", "run", "--rm", "--name", name,
+        "-v", f"{cwd}:/workspace{mount_suffix}", "-w", "/workspace",
+        "-v", f"{config.get_cursor_auth_volume()}:/root/.config/cursor",
+        "--memory", config.get_cursor_container_memory(),
+        "--cpus", config.get_cursor_container_cpus(),
+        "--pids-limit", str(config.get_cursor_container_pids_limit()),
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+    ]
+    api_key = config.get_cursor_api_key()
+    if api_key:
+        argv += ["-e", f"CURSOR_API_KEY={api_key}"]
+    argv.append(image)
+    argv += build_argv("agent", prompt_text, "/workspace", timeout_s, model, effort, skip_permissions, sandbox, container=True)
+    return argv
+
+
 async def spawn(
-    cursor_path: str, prompt_text: str, cwd: str, timeout_s: int, stdout_fh, stderr_fh,
+    image: str, prompt_text: str, cwd: str, timeout_s: int, stdout_fh, stderr_fh, job_id: str,
     model=None, effort=None, skip_permissions=False, sandbox=True,
 ):
-    """Spawn `cursor-agent -p` (via `powershell.exe -File` on Windows, see
-    build_argv) as a background subprocess. stdin is explicitly DEVNULL as a
-    defensive measure (see module docstring)."""
-    argv = build_argv(cursor_path, prompt_text, cwd, timeout_s, model, effort, skip_permissions, sandbox)
-    spawn_kwargs = dict(cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout_fh, stderr=stderr_fh)
-    if sys.platform == "win32":
-        spawn_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        spawn_kwargs["start_new_session"] = True
-    return await asyncio.create_subprocess_exec(*argv, **spawn_kwargs)
+    """Spawn the `docker run` client as a foreground subprocess for the
+    containerized cursor provider (Phase 4) -- see launcher.spawn_agy's
+    docstring for why this satisfies dispatcher.py's proc.pid/.wait()
+    contract unchanged (the docker-run client's PID, resolving when the
+    container exits). stdin=DEVNULL as always -- this process is a
+    long-running MCP server's subprocess; never let a child inherit its
+    stdio transport pipe.
+
+    Breaking signature change from the native (pre-Phase-4) version: takes
+    `image` instead of `cursor_path`, plus a new `job_id` param, mirroring
+    codex.py's containerized spawn exactly -- same "no dual mode" decision
+    already made for agy and codex."""
+    argv = build_docker_argv(image, prompt_text, cwd, timeout_s, job_id, model, effort, skip_permissions, sandbox)
+    return await asyncio.create_subprocess_exec(
+        *argv, stdout=stdout_fh, stderr=stderr_fh, stdin=subprocess.DEVNULL,
+    )
+
+
+def stop(job_id: str, pid: int) -> None:
+    """Provider-specific stop for cursor, mirroring codex.py's stop exactly:
+    the recorded pid is the docker-run client's PID, not the container's --
+    the container is a daemon-managed object with its own lifetime,
+    independent of that client process still being alive. stop_container is
+    the real stop; kill_process_tree(pid) afterward is a cheap, idempotent
+    defensive fallback on the client process itself."""
+    from cadet import config
+    from cadet.process.launcher import container_name_for_job
+    from cadet.process.treekill import kill_process_tree, stop_container
+    stop_container(container_name_for_job("cursor", job_id), grace_s=config.get_cursor_stop_grace_s())
+    kill_process_tree(pid)
 
 
 def _parse_duration_to_seconds(duration_str: str):
@@ -178,4 +306,4 @@ def parse_error(stderr_tail: str, finished_at_iso: str):
     return "quota_exhausted", reset_dt.isoformat()
 
 
-__all__ = ["NAME", "AGENT_ID", "DISPLAY_NAME", "build_argv", "spawn", "parse_error"]
+__all__ = ["NAME", "AGENT_ID", "DISPLAY_NAME", "build_argv", "build_docker_argv", "spawn", "stop", "parse_error"]
