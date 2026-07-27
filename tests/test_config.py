@@ -43,6 +43,14 @@ _ENV_VARS = [
     "CADET_CURSOR_CONTAINER_PIDS_LIMIT",
     "CADET_CURSOR_STOP_GRACE_S",
     "CADET_COPILOT_PATH",
+    "CADET_COPILOT_DOCKER_IMAGE",
+    "CADET_COPILOT_GITHUB_TOKEN",
+    "CADET_COPILOT_AUTH_VOLUME",
+    "CADET_COPILOT_CONTAINER_MEMORY",
+    "CADET_COPILOT_CONTAINER_CPUS",
+    "CADET_COPILOT_CONTAINER_PIDS_LIMIT",
+    "CADET_COPILOT_STOP_GRACE_S",
+    "CADET_WIDGET_PATH",
     "CADET_WEB_HOST",
     "CADET_WEB_PORT",
     "CADET_WEB_ENABLED",
@@ -295,6 +303,63 @@ class TestResolveCursorDockerImage(ConfigTestCase):
         self.assertEqual(mock_run.call_args[0][0], ["docker", "image", "inspect", "custom-cursor:v2"])
 
 
+class TestCopilotDockerGetters(ConfigTestCase):
+    def test_defaults(self):
+        self.assertEqual(config.get_copilot_docker_image(), "cadet-copilot:latest")
+        self.assertIsNone(config.get_copilot_github_token())
+        self.assertEqual(config.get_copilot_auth_volume(), "cadet-copilot-auth")
+        self.assertEqual(config.get_copilot_container_memory(), "2g")
+        self.assertEqual(config.get_copilot_container_cpus(), "2")
+        self.assertEqual(config.get_copilot_container_pids_limit(), 512)
+        self.assertEqual(config.get_copilot_stop_grace_s(), 10)
+
+    def test_overrides(self):
+        os.environ["CADET_COPILOT_DOCKER_IMAGE"] = "custom-copilot:v2"
+        os.environ["CADET_COPILOT_GITHUB_TOKEN"] = "test-token-abc"
+        os.environ["CADET_COPILOT_AUTH_VOLUME"] = "custom-copilot-auth"
+        os.environ["CADET_COPILOT_CONTAINER_MEMORY"] = "4g"
+        os.environ["CADET_COPILOT_CONTAINER_CPUS"] = "4"
+        os.environ["CADET_COPILOT_CONTAINER_PIDS_LIMIT"] = "1024"
+        os.environ["CADET_COPILOT_STOP_GRACE_S"] = "30"
+
+        self.assertEqual(config.get_copilot_docker_image(), "custom-copilot:v2")
+        self.assertEqual(config.get_copilot_github_token(), "test-token-abc")
+        self.assertEqual(config.get_copilot_auth_volume(), "custom-copilot-auth")
+        self.assertEqual(config.get_copilot_container_memory(), "4g")
+        self.assertEqual(config.get_copilot_container_cpus(), "4")
+        self.assertEqual(config.get_copilot_container_pids_limit(), 1024)
+        self.assertEqual(config.get_copilot_stop_grace_s(), 30)
+
+
+class TestResolveCopilotDockerImage(ConfigTestCase):
+    def test_image_found_resolves(self):
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as mock_run:
+            self.assertEqual(config.resolve_copilot_docker_image(), "cadet-copilot:latest")
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args[0][0], ["docker", "image", "inspect", "cadet-copilot:latest"])
+
+    def test_image_not_found_raises(self):
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr="no such image")):
+            with self.assertRaises(RuntimeError):
+                config.resolve_copilot_docker_image()
+
+    def test_docker_cli_missing_raises(self):
+        with patch("cadet.config.subprocess.run", side_effect=FileNotFoundError()):
+            with self.assertRaises(RuntimeError):
+                config.resolve_copilot_docker_image()
+
+    def test_docker_daemon_unreachable_raises(self):
+        with patch("cadet.config.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="docker", timeout=10)):
+            with self.assertRaises(RuntimeError):
+                config.resolve_copilot_docker_image()
+
+    def test_respects_image_env_override(self):
+        os.environ["CADET_COPILOT_DOCKER_IMAGE"] = "custom-copilot:v2"
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)) as mock_run:
+            self.assertEqual(config.resolve_copilot_docker_image(), "custom-copilot:v2")
+        self.assertEqual(mock_run.call_args[0][0], ["docker", "image", "inspect", "custom-copilot:v2"])
+
+
 class TestAgySettingsPath(ConfigTestCase):
     def test_defaults_to_gemini_antigravity_cli_settings(self):
         self.assertEqual(
@@ -321,21 +386,29 @@ class TestProviderGenericResolution(ConfigTestCase):
         with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
             self.assertEqual(config.resolve_provider_path("cursor"), "cadet-cursor:latest")
 
+    def test_resolve_provider_path_copilot_delegates_to_resolve_copilot_docker_image(self):
+        with patch("cadet.config.subprocess.run", return_value=subprocess.CompletedProcess([], 0)):
+            self.assertEqual(config.resolve_provider_path("copilot"), "cadet-copilot:latest")
+
     def test_resolve_provider_path_other_provider_uses_prefixed_env_var(self):
-        fake_copilot = os.path.join(self.temp_dir, "copilot.cmd")
-        with open(fake_copilot, "w") as f:
+        # "widget" stands in for a hypothetical future native (non-Docker)
+        # provider -- agy/codex/cursor/copilot are all containerized as of
+        # Phase 5, so none of the four real provider names still exercise
+        # this generic CADET_{PROVIDER}_PATH fallback branch.
+        fake_widget = os.path.join(self.temp_dir, "widget.cmd")
+        with open(fake_widget, "w") as f:
             f.write("")
-        os.environ["CADET_COPILOT_PATH"] = fake_copilot
-        self.assertEqual(config.resolve_provider_path("copilot"), fake_copilot)
+        os.environ["CADET_WIDGET_PATH"] = fake_widget
+        self.assertEqual(config.resolve_provider_path("widget"), fake_widget)
 
     def test_resolve_provider_path_missing_raises(self):
         with self.assertRaises(RuntimeError):
-            config.resolve_provider_path("copilot")
+            config.resolve_provider_path("widget")
 
     def test_resolve_provider_path_nonexistent_file_raises(self):
-        os.environ["CADET_COPILOT_PATH"] = os.path.join(self.temp_dir, "does_not_exist.cmd")
+        os.environ["CADET_WIDGET_PATH"] = os.path.join(self.temp_dir, "does_not_exist.cmd")
         with self.assertRaises(RuntimeError):
-            config.resolve_provider_path("copilot")
+            config.resolve_provider_path("widget")
 
     def test_get_provider_model_effort_sandbox_agy_matches_legacy_getters(self):
         os.environ["CADET_AGY_MODEL"] = "gemini-3.6-flash-medium"

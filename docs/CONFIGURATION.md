@@ -66,23 +66,35 @@ shape as `agy`'s Phase 2), not a plain API key — see `cadet-setup-cursor-docke
 
 ### `copilot` provider env vars
 
+`copilot` is containerized (Phase 5, mirrors `cursor`) — `CADET_COPILOT_PATH`/
+`CADET_COPILOT_NODE_PATH` (host binary + Node.js paths) are retired, replaced by Docker image
+resolution. Auth is **UNCONFIRMED** (no live login has been run against a real container yet — see
+[ARCHITECTURE.md](./ARCHITECTURE.md#containerized-copilot-execution)): a Docker named volume
+(OAuth-style, same shape as `cursor`'s Phase 4) is primary, with an optional token env var as a
+simpler override — see `cadet-setup-copilot-docker` below.
+
 | Var | Default | Purpose |
 |---|---|---|
-| `CADET_COPILOT_PATH` | none — provider unavailable if unset | Absolute path to `copilot.cmd` (e.g. `C:\Users\<user>\AppData\Roaming\npm\copilot.cmd`) — used only to locate its directory. On Windows, `providers/copilot.py` invokes `node.exe` + that directory's `node_modules\@github\copilot\npm-loader.js` **directly**, bypassing both `copilot.cmd` and `copilot.ps1` — each has its own unrelated bug that corrupts CADET's rendered prompt (see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior)). Not required at server startup — if unset, `copilot` just isn't in `delegate_task`'s available providers and requesting it returns a clean `{"error": ...}`. |
-| `CADET_COPILOT_NODE_PATH` | none | Absolute path to `node.exe`, used only if there's no `node.exe` sitting next to `CADET_COPILOT_PATH` (there usually isn't — Node is typically installed separately, e.g. `C:\Program Files\nodejs\node.exe`). Required in that common case; `copilot` jobs fail fast with a clear error if neither is found. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
+| `CADET_COPILOT_DOCKER_IMAGE` | `cadet-copilot:latest` | Docker image tag `copilot` jobs run inside (see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-copilot-execution)). Must already be built (`docker build -t <image> docker/copilot/`) — resolved and validated (`docker image inspect`) at server startup. |
+| `CADET_COPILOT_AUTH_VOLUME` | `cadet-copilot-auth` | Docker named volume mounted at `/root/.copilot` inside the container (the CLI's own default `COPILOT_HOME`). See `cadet-setup-copilot-docker` below — **UNCONFIRMED**, no live login has been run against it yet. |
+| `CADET_COPILOT_GITHUB_TOKEN` | none (optional) | Alternative/simpler auth, forwarded into the container as `COPILOT_GITHUB_TOKEN` (`docker run -e`) when set — per real vendor `--help` docs, takes precedence over any volume-stored credential. A fine-grained PAT with the "Copilot Requests" permission, or a `gh` CLI OAuth token; classic PATs (`ghp_`) are not supported. Not required — the auth volume above is the primary mechanism, mirroring `CADET_CURSOR_API_KEY`'s relationship to `cursor`'s auth volume. |
+| `CADET_COPILOT_CONTAINER_MEMORY` | `2g` | `docker run --memory` limit for `copilot` containers. |
+| `CADET_COPILOT_CONTAINER_CPUS` | `2` | `docker run --cpus` limit for `copilot` containers. |
+| `CADET_COPILOT_CONTAINER_PIDS_LIMIT` | `512` | `docker run --pids-limit` for `copilot` containers. |
+| `CADET_COPILOT_STOP_GRACE_S` | `10` | Grace period (`docker stop --timeout`) given to a container before it's force-killed, on job timeout/cancel/startup-reconciliation. |
 | `CADET_COPILOT_MODEL` | `auto` | Passed through as `copilot --model` unless overridden per-call by `delegate_task`'s `model` param. **Always passed explicitly**, defensively mirroring `cursor` (not confirmed to have the same sticky-global-default bug, but costs nothing to avoid relying on unconfirmed default behavior). |
 | `CADET_COPILOT_EFFORT` | none (no effort applied) | Passed through as `copilot --effort <value>` unless overridden per-call. One of `none`\|`minimal`\|`low`\|`medium`\|`high`\|`xhigh`\|`max`. **Confirmed to hard-error when combined with `model="auto"`** (`Error: Model "auto" does not support reasoning effort configuration...`) — pair with a real `CADET_COPILOT_MODEL`/`model` if setting this. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
-| `CADET_COPILOT_SANDBOX` | `true` | Whether `sandbox=True` (with `skip_permissions=False`) maps to `--mode plan` (genuinely read-only, confirmed) vs. omitting `--mode` entirely. **Unlike `codex`/`cursor`, `sandbox=False` with `skip_permissions=False` is not a known-broken combo here** — it behaves identically to `skip_permissions=True` (real edits) because `--allow-all-tools` is always passed (required for non-interactive mode to function at all) and `--mode plan`'s presence/absence is the only actual write gate. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
+| `CADET_COPILOT_SANDBOX` | `true` | Whether `sandbox=True` (with `skip_permissions=False`) maps to `--mode plan --deny-tool shell` (genuinely read-only, confirmed on native Windows — **unconfirmed inside the Linux container**) vs. omitting both flags. **Unlike `codex`/`cursor`, `sandbox=False` with `skip_permissions=False` is not a known-broken combo here** — it behaves identically to `skip_permissions=True` (real edits) because `--allow-all-tools` is always passed (required for non-interactive mode to function at all) and `--mode plan --deny-tool shell`'s presence/absence is the only actual write gate. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
 
 ### Provider status summary
 
-`agy`, `codex`, `cursor`, and `copilot` are all the providers CADET currently supports. `agy` and
-`codex` are containerized (Docker image resolution, required/fail-fast at startup for `agy`, same
-strictness not yet applied to `codex` — an unbuilt `cadet-codex:latest` just leaves `codex` out of
-`delegate_task`'s available providers rather than blocking server startup, same posture as the
-still-native `cursor`/`copilot`). `cursor` and `copilot` remain native host-binary providers — a
-provider with no `_PATH`/`_DOCKER_IMAGE` resolvable simply isn't offered, and requesting it returns a
-clean `{"error": ...}` rather than the server failing to start.
+`agy`, `codex`, `cursor`, and `copilot` are all the providers CADET currently supports, and **all
+four are now containerized** (Phase 2/3/4/5 respectively) — none remain on native host-binary
+execution. `agy` is required/fail-fast at startup; the other three's unbuilt image just leaves that
+provider out of `delegate_task`'s available providers rather than blocking server startup. A
+provider with no resolvable `_DOCKER_IMAGE` simply isn't offered, and requesting it returns a clean
+`{"error": ...}` rather than the server failing to start. `copilot`'s Phase 5 auth is the one
+still-unconfirmed piece — see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-copilot-execution).
 
 ## Setup step: `cadet-install-agy-permissions`
 
@@ -180,6 +192,31 @@ here** — confirmed empirically; the underlying `docker run --rm -v cadet-curso
 cursor -e NO_OPEN_BROWSER=1 cadet-cursor:latest agent login` blocks in the foreground until the
 browser flow completes, then exits 0. This is a one-time step per volume, not per job — the result
 persists in the named volume for every subsequent containerized `cursor` job.
+
+## Setup step: `cadet-setup-copilot-docker`
+
+A manual console script (`src/cadet/process/copilot_docker_setup.py`, registered in
+`pyproject.toml`) that runs a one-time OAuth login against the `CADET_COPILOT_AUTH_VOLUME` Docker
+volume — modeled on `cadet-setup-cursor-docker`, since there is no known portable host credential
+file to seed (unlike `codex`'s single-file copy): `copilot login --help` documents that its token
+is normally stored in the OS credential store on a full desktop OS, falling back to a plain-text
+file under `~/.copilot/` only "if a credential store is not found."
+
+```
+cadet-setup-copilot-docker          # creates the volume if needed and runs `copilot login` against it
+cadet-setup-copilot-docker --check  # reports whether the volume holds any credential file at all, no write
+```
+
+**UNCONFIRMED — this has not been live-tested against a real container** (unlike every other
+provider's setup script, each of which was verified end-to-end before being wired up). Open
+questions for whoever runs it first: whether the container's lack of an OS credential store
+reliably triggers the plain-text-file fallback as expected; whether `copilot login`'s browser-launch
+attempt needs an env var to suppress (no `NO_OPEN_BROWSER`-equivalent was found in `copilot
+--help`/`copilot help environment`, unlike cursor's documented one); and the exact filename(s)
+`check_volume` should look for once a real login has been observed (it currently just checks
+whether *any* file exists under the mount). If a token is available instead
+(`CADET_COPILOT_GITHUB_TOKEN`, see the env var table above), this whole script can likely be
+skipped — that path needs no interactive login step.
 
 ## Companion script: `cadet-wait-for-job`
 

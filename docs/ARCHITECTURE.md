@@ -181,7 +181,8 @@ this change.
 Phase 4: the same containerization decision made for `agy` and `codex` (see above), applied to
 `cursor` — replaces `cursor`'s native Windows subprocess execution (the `powershell.exe -File
 cursor-agent.ps1` workaround, see "Validated `cursor` CLI behavior" below) entirely — no dual mode.
-`copilot` is untouched by this change, the last remaining native provider.
+`copilot` was the last remaining native provider at this point — containerized next, in Phase 5
+(see "Containerized `copilot` execution" below).
 
 - **Image**: `docker/cursor/Dockerfile` — same minimal `debian:bookworm-slim` + `git` +
   `python3`/`pip3` base as `agy`/`codex`'s images. Installs via the official Linux installer
@@ -245,6 +246,88 @@ cursor-agent.ps1` workaround, see "Validated `cursor` CLI behavior" below) entir
 - **Known open issue (not `cursor`-specific — also affects `agy`/`codex`)**: the same fast-cancel
   orphaned-`Created`-container race described in "Containerized `codex` execution" above applies
   here too — not yet fixed in `treekill.stop_container`.
+
+## Containerized `copilot` execution
+
+Phase 5: the same containerization decision made for `agy`/`codex`/`cursor` (see above), applied to
+`copilot` — replaces `copilot`'s native Windows subprocess execution (the `node.exe npm-loader.js`
+workaround, see "Validated `copilot` CLI behavior" below) entirely — no dual mode. **All four
+providers are now containerized; none remain on native host-binary execution.**
+
+**Unlike agy/codex/cursor's Phase 2/3/4 rollouts, this phase's auth story is UNCONFIRMED — no live
+container run has exercised it yet.** Code, config plumbing, and tests are in place, mirroring the
+established pattern exactly, but whoever runs the first live smoke test should update this section
+(and `providers/copilot.py`'s module docstring) with the actual confirmed result, same as every
+prior phase's rollout note once it went from "wired up" to "verified."
+
+- **Image**: `docker/copilot/Dockerfile` — `node:22-bookworm-slim` base (not `debian:bookworm-slim`
+  + a raw binary download like `agy`/`codex`/`cursor`'s images) since `@github/copilot` is an npm
+  package with per-platform `optionalDependencies` (`@github/copilot-linux-x64` etc.) resolved
+  automatically by `npm install -g @github/copilot` at build time, not a single static binary to
+  `curl`. Node 22 was chosen as a current LTS baseline (no explicit `engines` field was found in the
+  installed package's own `package.json` to pin against). Built/tagged locally as
+  `cadet-copilot:latest` (`docker build -t cadet-copilot:latest docker/copilot/`) — no registry,
+  single machine only.
+- **Auth (UNCONFIRMED)**: two mechanisms, mirroring `cursor`'s "auth volume primary, key/token
+  optional override" shape:
+  1. A `cadet-copilot-auth` Docker named volume (see `CADET_COPILOT_AUTH_VOLUME` in
+     [CONFIGURATION.md](./CONFIGURATION.md)) mounted at `/root/.copilot` — the CLI's own default
+     `COPILOT_HOME`. `copilot login --help` documents that the OAuth device-flow token is normally
+     stored in the OS credential store, falling back to a plain-text file under `~/.copilot/` only
+     "if a credential store is not found" — expected (not yet confirmed) to be the case inside this
+     minimal container. `src/cadet/process/copilot_docker_setup.py`
+     (`cadet-setup-copilot-docker` console script) wraps a one-time `copilot login` against this
+     volume and a coarse `--check` (a throwaway-container file-presence scan — no confirmed
+     `status`/`whoami` subcommand exists for `copilot` the way `agent status` does for `cursor`).
+  2. `COPILOT_GITHUB_TOKEN` (`config.get_copilot_github_token()`, `CADET_COPILOT_GITHUB_TOKEN` env
+     var), forwarded via `-e` when set. Per `copilot login --help`/`copilot help environment` (real
+     vendor docs, confirmed by reading `--help` output on this machine — **not** by a live
+     authenticated call), this takes precedence over any stored credential. A fine-grained PAT with
+     the "Copilot Requests" permission, or a `gh` CLI OAuth token, both work; classic PATs (`ghp_`)
+     are explicitly not supported. This is the more likely-to-work-first path, needing no
+     interactive device-flow step inside the container at all.
+- **The Windows-host-building-Linux-argv bug**: same shape as `cursor`'s Phase 4 fix. `copilot.py`'s
+  pre-existing `build_argv` has an `if sys.platform == "win32":` branch (resolves `node.exe` +
+  `npm-loader.js` next to the native Windows npm-global install — see "Validated `copilot` CLI
+  behavior" below) that would incorrectly fire here if reused unchanged, since inside the container
+  the globally-installed `copilot` binary is already directly on PATH with no such indirection
+  needed. Fixed identically: a `container: bool = False` keyword param on `build_argv` skips the
+  win32 branch unconditionally when `True`, returning the bare Linux shape (`[copilot_path] +
+  cli_args`). Default `False` preserves every existing native call site and its tests unchanged;
+  `build_docker_argv` is the only caller that passes `container=True`.
+- **Invocation**: `build_docker_argv` wraps the inner `build_argv(..., container=True)` call inside
+  `docker run --rm --name <container>`, with `-v <cwd>:/workspace{:ro or :rw} -w /workspace`, the
+  `-v cadet-copilot-auth:/root/.copilot` mount above (plus `-e COPILOT_GITHUB_TOKEN=...` when set),
+  the same resource-limit and hardening flags as the other three containers (`--memory`, `--cpus`,
+  `--pids-limit`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`), no `--network none`
+  (copilot needs outbound HTTPS to GitHub's Copilot API). The `/workspace` mount is `:ro` when
+  `sandbox=True and not skip_permissions`, `:rw` otherwise — same defense-in-depth pattern as the
+  other three. Whether copilot's own `--mode plan --deny-tool shell` / `--allow-all-tools`
+  argv-level semantics (validated on native Windows only, see "Validated `copilot` CLI behavior"
+  below) hold identically inside this Linux container is **NOT yet confirmed** — no live container
+  run has exercised them (unlike `cursor`'s Phase 4, which did confirm this before wiring up). The
+  bind mount still enforces the read-only/read-write distinction at the kernel VFS level as
+  defense-in-depth regardless of whether the CLI-level flags behave identically. Container name is
+  deterministic (`cadet-copilot-<job_id>`), via the same
+  `launcher.container_name_for_job(provider, job_id)` the other three use.
+- **Stop/cancel/reconcile**: identical shape to `agy`/`codex`/`cursor`'s — the recorded `pid` is the
+  `docker run` client's, not the container's own lifetime. `providers/copilot.py`'s `stop(job_id,
+  pid)` mirrors `providers/cursor.py`'s `stop` exactly (previously copilot had no `stop()` at all —
+  the dispatcher fell back to a bare `kill_process_tree`, which never stopped a container). `
+  dispatcher.py`'s `_CONTAINERIZED_PROVIDERS` and `_stop_fns()`, and `reconcile.py`'s startup loop,
+  all now treat `agy`, `codex`, `cursor`, and `copilot` identically (`provider_name in ("agy",
+  "codex", "cursor", "copilot")`).
+- **Bootstrap**: `config.resolve_copilot_docker_image()` mirrors the other three's
+  `resolve_*_docker_image()` (all four now share the `_resolve_docker_image(image, build_hint)`
+  helper) — `CADET_COPILOT_PATH`/`CADET_COPILOT_NODE_PATH` (host binary + Node.js paths) are retired
+  in favor of Docker image resolution.
+- **Known open issue (not `copilot`-specific — also affects `agy`/`codex`/`cursor`)**: the same
+  fast-cancel orphaned-`Created`-container race described in "Containerized `codex` execution"
+  above applies here too — not yet fixed in `treekill.stop_container`.
+- **Known open issue (`copilot`-specific)**: the entire auth story above is unconfirmed — see the
+  callout at the top of this section. A live `copilot login` attempt inside the container, and/or a
+  real PAT/token, is needed before this phase can be considered genuinely done the way `cursor`'s
+  Phase 4 was.
 
 ## The `context_id` thread
 

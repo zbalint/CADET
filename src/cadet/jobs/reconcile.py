@@ -56,7 +56,7 @@ async def reconcile_on_startup(dispatcher, db_path=None) -> dict:
     for job in running_jobs:
         provider_name = job["provider"] or "agy"
         pid = job["pid"]
-        if provider_name in ("agy", "codex", "cursor"):
+        if provider_name in ("agy", "codex", "cursor", "copilot"):
             # The recorded pid is the docker-run client's PID from the
             # previous CADET instance, not the container's own lifetime -- a
             # dead client PID does NOT mean the container (a daemon-managed
@@ -67,6 +67,7 @@ async def reconcile_on_startup(dispatcher, db_path=None) -> dict:
                 "agy": config.get_agy_stop_grace_s,
                 "codex": config.get_codex_stop_grace_s,
                 "cursor": config.get_cursor_stop_grace_s,
+                "copilot": config.get_copilot_stop_grace_s,
             }[provider_name]()
             await asyncio.to_thread(
                 stop_container, container_name_for_job(provider_name, job["job_id"]), grace_s

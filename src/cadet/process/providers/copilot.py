@@ -123,6 +123,53 @@ real installed binary (`@github/copilot` npm package v1.0.75, Windows):
   real non-quota error strings were captured during validation (the
   model/effort mismatch and the model-not-available error) and are covered
   by parse_error's tests as confirmed non-matches.
+
+Containerized 2026-07-27 (Phase 5, mirroring codex's Phase 3 / cursor's
+Phase 4 pattern — see docs/ARCHITECTURE.md's "Containerized copilot
+execution" section). Fully replaces the native Windows node.exe+npm-loader.js
+path above — no dual mode, same decision already made for agy, codex, and
+cursor:
+- Unlike codex/cursor (a single static Linux binary), `@github/copilot` is an
+  npm package with per-platform `optionalDependencies`
+  (`@github/copilot-linux-x64` etc., resolved automatically by `npm install`
+  at build time) — hence the `node:22-bookworm-slim` base image rather than a
+  raw binary download onto `debian:bookworm-slim`. Inside the container the
+  globally-installed `copilot` binary is directly on PATH, so no
+  node.exe/npm-loader.js indirection is needed the way the native Windows
+  npm-global-install layout requires (see `_resolve_windows_invocation`
+  above) — `build_argv(container=True)` skips straight to `[copilot_path]`.
+- **Auth: UNCONFIRMED, not yet live-tested end-to-end** (unlike agy/codex/
+  cursor, whose Phase 2/3/4 rollouts each empirically validated a real login
+  or credential copy against the real container before being wired up here).
+  Two mechanisms are implemented, mirroring cursor's "auth volume primary,
+  token optional override" shape — see `build_docker_argv`'s docstring for
+  the full reasoning:
+  1. A `cadet-copilot-auth` Docker volume mounted at `/root/.copilot` (the
+     CLI's own default `COPILOT_HOME`), intended to be populated by a
+     one-time `copilot login` device-flow via `copilot_docker_setup.py`
+     (mirrors `cursor_docker_setup.py`'s `login()`/`check_volume()` shape).
+     `copilot login --help` documents that the token is normally stored in
+     the OS credential store, falling back to a plain-text file under
+     `~/.copilot/` only "if a credential store is not found" — expected
+     (not yet confirmed) to be the case in this minimal container.
+  2. `COPILOT_GITHUB_TOKEN` (`config.get_copilot_github_token()`,
+     `CADET_COPILOT_GITHUB_TOKEN` env var), forwarded via `-e` when set —
+     confirmed by `copilot help environment`/`copilot login --help` (real
+     vendor docs) to take precedence over any stored credential. A
+     fine-grained PAT with the "Copilot Requests" permission or a `gh` CLI
+     OAuth token both work per the same docs; classic PATs (`ghp_`) are
+     explicitly not supported. This is the more likely-to-work-first path,
+     since it needs no interactive device-flow step inside the container.
+  **Whoever runs the first live smoke test against this image should update
+  this docstring with the actual confirmed result**, same as every prior
+  phase's rollout note.
+- The `--mode plan --deny-tool shell` / `--allow-all-tools` argv-level
+  semantics validated above (on native Windows) are assumed, NOT yet
+  confirmed, to hold identically inside the Linux container — no live
+  container run has exercised them yet (unlike cursor's Phase 4, which did
+  confirm this before wiring up). The `/workspace` bind mount's `:ro`/`:rw`
+  distinction still backs the read-only/read-write semantics as
+  defense-in-depth regardless.
 """
 import asyncio
 import os
@@ -167,6 +214,7 @@ def _resolve_windows_invocation(copilot_path: str) -> list[str]:
 def build_argv(
     copilot_path: str, prompt_text: str, cwd: str, timeout_s: int,
     model=None, effort=None, skip_permissions=False, sandbox=True,
+    container: bool = False,
 ) -> list[str]:
     """Pure argv construction. `copilot` has no CLI-level timeout flag —
     CADET's own asyncio.wait_for + kill_process_tree already enforces
@@ -174,7 +222,18 @@ def build_argv(
 
     On Windows, `copilot_path`'s own `.cmd`/`.ps1` are both bypassed (see
     module docstring for the two separate, unrelated bugs each has) in favor
-    of invoking `node.exe` + the vendor's own `npm-loader.js` directly."""
+    of invoking `node.exe` + the vendor's own `npm-loader.js` directly.
+
+    `container=True` (Phase 5, used only by build_docker_argv below) always
+    skips the win32 node.exe+npm-loader.js resolution branch and returns the
+    bare Linux shape (`[copilot_path] + cli_args`), regardless of what
+    `sys.platform` reports — this function still runs on the Windows host
+    process that constructs the `docker run` argv, but the *inner*
+    `copilot ...` invocation it's building always targets the Linux
+    container, where the globally-installed `copilot` binary is already
+    directly on PATH (no node.exe/npm-loader.js indirection needed, unlike
+    the native Windows npm-global-install layout). Default False keeps every
+    existing (native, non-containerized) call site and its tests unchanged."""
     model_arg = model or "auto"
     cli_args = [
         "-p", prompt_text,
@@ -202,25 +261,92 @@ def build_argv(
     # both omit --mode plan and therefore both allow real edits — see module
     # docstring for why this collapse (unlike codex/cursor) is a genuine
     # platform behavior, not a bug being papered over.
-    if sys.platform == "win32":
+    if not container and sys.platform == "win32":
         return _resolve_windows_invocation(copilot_path) + cli_args
     return [copilot_path] + cli_args
 
 
+def build_docker_argv(
+    image: str, prompt_text: str, cwd: str, timeout_s: int, job_id: str,
+    model=None, effort=None, skip_permissions=False, sandbox=True,
+) -> list[str]:
+    """Wraps the inner copilot invocation (build_argv, above, called with
+    container=True) in `docker run`. Mirrors codex.py's/cursor.py's
+    build_docker_argv shape: --rm so a finished container never lingers;
+    --name is deterministic from job_id so stop() (treekill.stop_container)
+    can target it later. No --network none: copilot needs outbound HTTPS to
+    GitHub's Copilot API.
+
+    **Auth (Phase 5, UNCONFIRMED against a real live login — see module
+    docstring and copilot_docker_setup.py for the same caveat)**: two
+    mechanisms, mirroring cursor's "auth volume primary, key/token optional
+    override" shape:
+    1. `cadet-copilot-auth` (config.get_copilot_auth_volume()) is a Docker
+       named volume mounted at `/root/.copilot` (the CLI's own default
+       `COPILOT_HOME`). A one-time `copilot login` device-flow against this
+       volume (see copilot_docker_setup.py) is intended to populate it.
+    2. `COPILOT_GITHUB_TOKEN` (config.get_copilot_github_token(),
+       `CADET_COPILOT_GITHUB_TOKEN` env var) is forwarded via `-e` when set —
+       per `copilot login --help`/`copilot help environment`, this takes
+       precedence over any stored credential, mirroring CURSOR_API_KEY's
+       optional-override relationship to cursor's own auth volume."""
+    from cadet import config
+    from cadet.process.launcher import container_name_for_job
+
+    name = container_name_for_job("copilot", job_id)
+    mount_suffix = ":ro" if (sandbox and not skip_permissions) else ""
+    argv = [
+        "docker", "run", "--rm", "--name", name,
+        "-v", f"{cwd}:/workspace{mount_suffix}", "-w", "/workspace",
+        "-v", f"{config.get_copilot_auth_volume()}:/root/.copilot",
+        "--memory", config.get_copilot_container_memory(),
+        "--cpus", config.get_copilot_container_cpus(),
+        "--pids-limit", str(config.get_copilot_container_pids_limit()),
+        "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",
+    ]
+    token = config.get_copilot_github_token()
+    if token:
+        argv += ["-e", f"COPILOT_GITHUB_TOKEN={token}"]
+    argv.append(image)
+    argv += build_argv("copilot", prompt_text, "/workspace", timeout_s, model, effort, skip_permissions, sandbox, container=True)
+    return argv
+
+
 async def spawn(
-    copilot_path: str, prompt_text: str, cwd: str, timeout_s: int, stdout_fh, stderr_fh,
+    image: str, prompt_text: str, cwd: str, timeout_s: int, stdout_fh, stderr_fh, job_id: str,
     model=None, effort=None, skip_permissions=False, sandbox=True,
 ):
-    """Spawn copilot (via `node.exe npm-loader.js` on Windows, see
-    build_argv) as a background subprocess. stdin is explicitly DEVNULL as a
-    defensive measure (see module docstring)."""
-    argv = build_argv(copilot_path, prompt_text, cwd, timeout_s, model, effort, skip_permissions, sandbox)
-    spawn_kwargs = dict(cwd=cwd, stdin=subprocess.DEVNULL, stdout=stdout_fh, stderr=stderr_fh)
-    if sys.platform == "win32":
-        spawn_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        spawn_kwargs["start_new_session"] = True
-    return await asyncio.create_subprocess_exec(*argv, **spawn_kwargs)
+    """Spawn the `docker run` client as a foreground subprocess for the
+    containerized copilot provider (Phase 5) -- see launcher.spawn_agy's
+    docstring for why this satisfies dispatcher.py's proc.pid/.wait()
+    contract unchanged (the docker-run client's PID, resolving when the
+    container exits). stdin=DEVNULL as always -- this process is a
+    long-running MCP server's subprocess; never let a child inherit its
+    stdio transport pipe.
+
+    Breaking signature change from the native (pre-Phase-5) version: takes
+    `image` instead of `copilot_path`, plus a new `job_id` param, mirroring
+    codex.py's/cursor.py's containerized spawn exactly -- same "no dual mode"
+    decision already made for agy, codex, and cursor."""
+    argv = build_docker_argv(image, prompt_text, cwd, timeout_s, job_id, model, effort, skip_permissions, sandbox)
+    return await asyncio.create_subprocess_exec(
+        *argv, stdout=stdout_fh, stderr=stderr_fh, stdin=subprocess.DEVNULL,
+    )
+
+
+def stop(job_id: str, pid: int) -> None:
+    """Provider-specific stop for copilot, mirroring codex.py's/cursor.py's
+    stop exactly: the recorded pid is the docker-run client's PID, not the
+    container's -- the container is a daemon-managed object with its own
+    lifetime, independent of that client process still being alive.
+    stop_container is the real stop; kill_process_tree(pid) afterward is a
+    cheap, idempotent defensive fallback on the client process itself."""
+    from cadet import config
+    from cadet.process.launcher import container_name_for_job
+    from cadet.process.treekill import kill_process_tree, stop_container
+    stop_container(container_name_for_job("copilot", job_id), grace_s=config.get_copilot_stop_grace_s())
+    kill_process_tree(pid)
 
 
 def _parse_duration_to_seconds(duration_str: str):
@@ -247,4 +373,4 @@ def parse_error(stderr_tail: str, finished_at_iso: str):
     return "quota_exhausted", reset_dt.isoformat()
 
 
-__all__ = ["NAME", "AGENT_ID", "DISPLAY_NAME", "build_argv", "spawn", "parse_error"]
+__all__ = ["NAME", "AGENT_ID", "DISPLAY_NAME", "build_argv", "build_docker_argv", "spawn", "stop", "parse_error"]
