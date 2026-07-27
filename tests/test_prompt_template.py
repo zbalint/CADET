@@ -25,24 +25,14 @@ agent for this project). There is no human available to answer follow-up questio
 session — proceed autonomously using your best judgement and explicitly document any assumptions
 you make in your final summary.
 
-## Shared Memory Context
-- Context ID: `task_refactor_auth_01`
-- Before starting, call search_memory(context_id="task_refactor_auth_01", kwargs={}) (plus a
-  keyword search on the task subject) to load prior findings/decisions logged under this thread by
-  Claude Code or by earlier delegated jobs.
-- Log meaningful milestones via log_event(context_id="task_refactor_auth_01",
-  agent_id="antigravity", kwargs={}).
-- When you finish (success OR failure), you MUST:
-  1. log_event(context_id="task_refactor_auth_01", agent_id="antigravity", type="completion",
-     content="<one-line summary + outcome>", kwargs={}).
-  2. store_memory(context_id="task_refactor_auth_01", owner_id="antigravity", ..., kwargs={}) for
-     any durable finding/decision, so Claude Code can retrieve it later.
-
 ## CADET Job Metadata
+- Context ID: `task_refactor_auth_01`
+- Agent ID: antigravity
 - Job label: auth-refactor-step1
 - Working directory: C:\\repos\\myapp
-- CADET job id: job-a1b2c3d4e5f6  (informational only — you have no CADET tools; do not attempt to
-  call them)
+- CADET job id: job-a1b2c3d4e5f6  (informational only — you have no CADET or SALTMDB/MCP tools in
+  this environment; do not attempt to call any, including search_memory/log_event/store_memory.
+  Just write your complete answer as your final plain-text response.)
 
 ## Your Task
 Refactor the auth middleware to use the new token validator
@@ -60,17 +50,24 @@ class TestRenderPrompt(unittest.TestCase):
 
     def test_all_placeholders_substituted(self):
         rendered = render_prompt(**WORKED_EXAMPLE_ARGS)
-        for placeholder in ("{context_id}", "{label}", "{cwd}", "{job_id}", "{prompt}"):
+        for placeholder in ("{context_id}", "{agent_id}", "{label}", "{cwd}", "{job_id}", "{prompt}"):
             self.assertNotIn(placeholder, rendered)
 
-    def test_literal_kwargs_braces_untouched(self):
+    def test_no_saltmdb_or_mcp_tool_call_instructions(self):
+        # Regression guard: no delegated job of any provider (including the
+        # containerized agy) has SALTMDB/MCP wired into its environment, so the
+        # template must never instruct a job to call these tools — doing so
+        # unconditionally previously caused cursor jobs to silently return empty
+        # stdout on `status=succeeded`/`exit_code=0` (see render_prompt's docstring).
         rendered = render_prompt(**WORKED_EXAMPLE_ARGS)
-        self.assertIn("kwargs={}", rendered)
+        for forbidden in ("search_memory(", "log_event(", "store_memory("):
+            self.assertNotIn(forbidden, rendered)
+        self.assertIn("you have no CADET or SALTMDB/MCP tools", rendered)
 
-    def test_context_id_appears_in_shared_memory_section(self):
+    def test_context_id_and_agent_id_appear_as_job_metadata(self):
         rendered = render_prompt(**WORKED_EXAMPLE_ARGS)
         self.assertIn('Context ID: `task_refactor_auth_01`', rendered)
-        self.assertIn('search_memory(context_id="task_refactor_auth_01"', rendered)
+        self.assertIn('Agent ID: antigravity', rendered)
 
     def test_prompt_text_placed_under_your_task_heading(self):
         rendered = render_prompt(**WORKED_EXAMPLE_ARGS)
@@ -89,15 +86,13 @@ class TestRenderPrompt(unittest.TestCase):
         # just spelled out explicitly against the (default) agy identity.
         rendered = render_prompt(**WORKED_EXAMPLE_ARGS)
         self.assertIn("You are Antigravity (agy), running headless via CADET", rendered)
-        self.assertIn('agent_id="antigravity"', rendered)
-        self.assertIn('owner_id="antigravity"', rendered)
+        self.assertIn("Agent ID: antigravity", rendered)
 
     def test_custom_agent_identity_is_substituted(self):
         args = dict(WORKED_EXAMPLE_ARGS)
         rendered = render_prompt(**args, agent_id="codex", display_name="OpenAI Codex CLI")
         self.assertIn("You are OpenAI Codex CLI, running headless via CADET", rendered)
-        self.assertIn('agent_id="codex"', rendered)
-        self.assertIn('owner_id="codex"', rendered)
+        self.assertIn("Agent ID: codex", rendered)
         self.assertNotIn("antigravity", rendered)
 
     def test_prompt_containing_placeholder_like_text_is_not_double_substituted(self):
