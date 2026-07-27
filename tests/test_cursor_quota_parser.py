@@ -3,13 +3,28 @@ import unittest
 from cadet.process.providers.cursor import parse_error
 
 # NOTE: this exact wording is UNCONFIRMED (see cursor.py's module docstring) —
-# no real quota exhaustion was observed during empirical validation. These
-# tests cover the parser's mechanics against a plausible shape, not a
-# vendor-verified string.
+# no real quota exhaustion was observed during empirical validation. This
+# test covers the fallback parser's mechanics against a plausible shape, not
+# a vendor-verified string.
 PLAUSIBLE_QUOTA_STDERR = "Error: usage limit reached. Try again in 5h30m.\n"
+
+# Real stderr text captured 2026-07-27 during live multi-provider stress-testing
+# (replaying build_docker_argv's exact argv outside CADET's dispatcher against a
+# real free-tier account that had genuinely exhausted its usage cap) — see
+# cursor.py's module docstring. Unlike the guessed shape above, this real
+# message carries no reset-time/ETA at all.
+REAL_QUOTA_STDERR = (
+    "ActionRequiredError: You've hit your usage limit Get Cursor Pro for more "
+    "Agent usage, unlimited Tab, and more."
+)
 
 
 class TestParseError(unittest.TestCase):
+    def test_matches_real_confirmed_wording_with_no_reset_eta(self):
+        error_kind, quota_reset_at = parse_error(REAL_QUOTA_STDERR, "2026-07-26T00:00:00")
+        self.assertEqual(error_kind, "quota_exhausted")
+        self.assertIsNone(quota_reset_at)
+
     def test_matches_plausible_wording(self):
         error_kind, quota_reset_at = parse_error(PLAUSIBLE_QUOTA_STDERR, "2026-07-26T00:00:00")
         self.assertEqual(error_kind, "quota_exhausted")

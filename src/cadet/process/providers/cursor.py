@@ -73,9 +73,17 @@ installed binary (`cursor-agent`, Windows, free-tier account):
   but stdin is still explicitly redirected to DEVNULL as a defensive measure
   (this process is a long-running MCP server's subprocess; never let a
   child inherit its stdio transport pipe).
-- No structured quota-exhaustion signal was found in vendor docs or during
-  validation (this account never hit a real rate limit) — parse_error is
-  best-effort only, same posture as codex's unconfirmed regex.
+- **Confirmed 2026-07-27** (real free-tier account, hit during live multi-provider
+  stress-testing — replaying `build_docker_argv`'s exact argv outside CADET's own
+  dispatcher via a bare `subprocess.run`): the real exhaustion message is
+  `"ActionRequiredError: You've hit your usage limit Get Cursor Pro for more
+  Agent usage, unlimited Tab, and more."`, exit code 1, **no reset-time/ETA
+  anywhere in the message** — unlike agy/codex, `quota_reset_at` cannot be
+  derived for cursor even in principle from this wording. `parse_error`
+  matches this via `_QUOTA_NO_RESET_PATTERN` and returns
+  `("quota_exhausted", None)`. The original guessed shape (`_QUOTA_PATTERN_WITH_RESET`,
+  which does expect a duration) is kept as a fallback in case a different
+  plan tier emits reset-ETA wording, but has never itself been observed.
 
 Containerized 2026-07-27 (Phase 4, mirroring codex's Phase 3 pattern — see
 docs/ARCHITECTURE.md's "Containerized cursor execution" section). Fully
@@ -122,10 +130,19 @@ DISPLAY_NAME = "Cursor CLI"
 # release, not something CADET_CURSOR_PATH needs to override.
 _WINDOWS_POWERSHELL = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
-# Best-effort only: not empirically confirmed (never observed a real quota
-# exhaustion during validation, and forcing one would burn the pool). Not
-# finding a match is not an error, same as agy/codex's quota parsers.
-_QUOTA_PATTERN = re.compile(r"usage limit reached.*?(?:try again|resets?) (?:in |at )?([0-9dhms]+)", re.IGNORECASE | re.DOTALL)
+# _QUOTA_PATTERN_WITH_RESET is the original best-effort guess (never observed
+# during initial validation) -- kept as a fallback shape in case some cursor
+# plan tier does emit a reset ETA. _QUOTA_NO_RESET_PATTERN is the real,
+# empirically confirmed message (2026-07-27, real free-tier account, live
+# job replay outside CADET's dispatcher): "ActionRequiredError: You've hit
+# your usage limit Get Cursor Pro for more Agent usage, unlimited Tab, and
+# more." -- exit code 1, no reset-time/ETA given anywhere in the message, so
+# quota_reset_at legitimately stays None for this shape. This is intentionally
+# cursor-specific: agy (quota.py), codex.py, and copilot.py each have their own
+# independent quota wording and must NOT share this pattern -- every provider
+# has been observed (or is expected) to signal exhaustion differently.
+_QUOTA_PATTERN_WITH_RESET = re.compile(r"usage limit reached.*?(?:try again|resets?) (?:in |at )?([0-9dhms]+)", re.IGNORECASE | re.DOTALL)
+_QUOTA_NO_RESET_PATTERN = re.compile(r"hit your usage limit", re.IGNORECASE)
 _DURATION_PATTERN = re.compile(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
 
 
@@ -291,11 +308,17 @@ def _parse_duration_to_seconds(duration_str: str):
 
 
 def parse_error(stderr_tail: str, finished_at_iso: str):
-    """Best-effort scan of a failed job's stderr tail for a quota-exhaustion
-    message. UNCONFIRMED — no real cursor-agent rate-limit wording was
-    observed during validation. Returns (None, None) on no match, which is
-    the expected/common case, not an error."""
-    match = _QUOTA_PATTERN.search(stderr_tail or "")
+    """Scan a failed job's stderr tail for a quota-exhaustion message.
+    Returns (None, None) on no match, which is the expected/common case, not
+    an error. Checks the confirmed real message first (no reset ETA in it,
+    so quota_reset_at stays None), then falls back to the original unconfirmed
+    guessed shape (which does carry a duration) in case some plan tier emits
+    that instead — see the module docstring and the two pattern constants
+    above for why these are cursor-specific, not shared with other providers."""
+    stderr_tail = stderr_tail or ""
+    if _QUOTA_NO_RESET_PATTERN.search(stderr_tail):
+        return "quota_exhausted", None
+    match = _QUOTA_PATTERN_WITH_RESET.search(stderr_tail)
     if not match:
         return None, None
     seconds = _parse_duration_to_seconds(match.group(1))
