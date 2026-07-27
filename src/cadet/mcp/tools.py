@@ -5,6 +5,7 @@ import uuid
 
 from cadet import config, status
 from cadet.db import job_store
+from cadet.jobs import quota_gate
 from cadet.mcp.server import mcp
 from cadet.process.providers import registry
 from cadet.prompt.template import render_prompt
@@ -61,7 +62,7 @@ def _now_iso() -> str:
 async def delegate_task(
     prompt: str = None, context_id: str = None, cwd: str = None, timeout_s: int = None,
     label: str = None, provider: str = None, model: str = None, effort: str = None,
-    skip_permissions: bool = None,
+    skip_permissions: bool = None, skip_quota_check: bool = None,
     **kwargs,
 ) -> dict:
     """Starts a background job running the chosen provider's CLI (default: agy)
@@ -92,6 +93,25 @@ async def delegate_task(
     model_ = _resolve(model, kw, kwargs, "model") or config.get_provider_model(provider_)
     effort_ = _resolve(effort, kw, kwargs, "effort") or config.get_provider_effort(provider_)
     skip_permissions_ = _coerce_bool(_resolve(skip_permissions, kw, kwargs, "skip_permissions"))
+    skip_quota_check_ = _coerce_bool(_resolve(skip_quota_check, kw, kwargs, "skip_quota_check"))
+
+    if not skip_quota_check_:
+        # Courtesy fast-path only -- UX sugar so a caller gets an immediate,
+        # synchronous answer instead of round-tripping through check_task_status.
+        # NOT a substitute for the dispatcher-side gate in run_job: the pool can
+        # become exhausted after this check but before a deep queue actually
+        # dispatches, so that gate remains the only load-bearing enforcement.
+        block = quota_gate.check_quota_gate(provider_, model_)
+        if block is not None:
+            return {
+                "error": (
+                    f"provider quota exhausted: {block['pool_key']} blocked until "
+                    f"{block['quota_reset_at'] or 'unknown'} ({block['confidence']})"
+                ),
+                "error_kind": "quota_exhausted",
+                "quota_reset_at": block["quota_reset_at"],
+                "quota_reset_confidence": block["confidence"],
+            }
 
     job_id = "job-" + uuid.uuid4().hex[:12]
     job_log_dir = config.get_job_log_dir(job_id)
@@ -173,6 +193,7 @@ def get_task_output(job_id: str = None, tail_lines: int = None, **kwargs) -> dic
         "exit_code": job["exit_code"],
         "error_kind": job["error_kind"],
         "quota_reset_at": job["quota_reset_at"],
+        "quota_reset_confidence": job["quota_reset_confidence"],
         "duration_s": duration_s,
         "truncated": stdout_truncated or stderr_truncated,
         "stdout_log_path": job["stdout_log_path"],

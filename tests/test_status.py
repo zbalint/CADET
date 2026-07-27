@@ -73,8 +73,8 @@ class TestShapeStatusDict(StatusTestCase):
         shaped = status.shape_status_dict(job, db_path=self.db_path)
         expected_keys = {
             "job_id", "label", "context_id", "status", "provider", "model", "effort",
-            "skip_permissions", "created_at", "started_at", "elapsed_s", "exit_code",
-            "error_kind", "quota_reset_at", "timeout_s", "queue_position",
+            "skip_permissions", "skip_quota_check", "created_at", "started_at", "elapsed_s", "exit_code",
+            "error_kind", "quota_reset_at", "quota_reset_confidence", "timeout_s", "queue_position",
         }
         self.assertEqual(set(shaped.keys()), expected_keys)
 

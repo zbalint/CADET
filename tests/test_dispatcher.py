@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from cadet.db import job_store
+from cadet.db import job_store, provider_status_store
 from cadet.db.schema import init_db
 from cadet.jobs.dispatcher import Dispatcher
 
@@ -272,6 +272,114 @@ class TestRunJobLifecycle(DispatcherTestCase):
         job = job_store.get_job("job-1", db_path=self.db_path)
         self.assertEqual(job["status"], "succeeded")
         self.assertEqual(job["pid"], 666)
+
+
+class TestQuotaGate(DispatcherTestCase):
+    async def test_blocked_job_never_calls_spawn(self):
+        self._create_pending_job()
+        provider_status_store.upsert_exhaustion(
+            "agy:model:none", "2099-01-01T00:00:00", "confirmed", "job-0", "2026-07-27T00:00:00",
+            db_path=self.db_path,
+        )
+        mock_spawn = AsyncMock()
+        with patch("cadet.jobs.dispatcher.spawn_agy", mock_spawn):
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-1")
+
+        mock_spawn.assert_not_called()
+        job = job_store.get_job("job-1", db_path=self.db_path)
+        self.assertEqual(job["status"], "failed")
+        self.assertEqual(job["error_kind"], "quota_exhausted")
+        self.assertEqual(job["quota_reset_at"], "2099-01-01T00:00:00")
+        self.assertEqual(job["quota_reset_confidence"], "confirmed")
+        self.assertEqual(self.dispatcher._semaphore._value, 2)
+
+    async def test_skip_quota_check_bypasses_a_blocking_row(self):
+        self._create_pending_job(skip_quota_check=True)
+        provider_status_store.upsert_exhaustion(
+            "agy:model:none", "2099-01-01T00:00:00", "confirmed", "job-0", "2026-07-27T00:00:00",
+            db_path=self.db_path,
+        )
+        with patch("cadet.jobs.dispatcher.spawn_agy", AsyncMock(return_value=_make_proc(pid=777, wait_return=0))):
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-1")
+
+        job = job_store.get_job("job-1", db_path=self.db_path)
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(job["pid"], 777)
+
+    async def test_already_past_reset_time_does_not_block(self):
+        self._create_pending_job()
+        provider_status_store.upsert_exhaustion(
+            "agy:model:none", "2020-01-01T00:00:00", "confirmed", "job-0", "2019-12-31T00:00:00",
+            db_path=self.db_path,
+        )
+        with patch("cadet.jobs.dispatcher.spawn_agy", AsyncMock(return_value=_make_proc(pid=888, wait_return=0))):
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-1")
+
+        job = job_store.get_job("job-1", db_path=self.db_path)
+        self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(job["pid"], 888)
+        # Gate self-heals: the stale row should have been cleared.
+        self.assertIsNone(provider_status_store.get_status("agy:model:none", db_path=self.db_path))
+
+    async def test_two_queued_jobs_for_same_exhausted_pool_both_blocked(self):
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "C:\\tools\\agy.exe"}, max_concurrent=2, db_path=self.db_path
+        )
+        self._create_pending_job(job_id="job-a")
+        self._create_pending_job(job_id="job-b")
+        provider_status_store.upsert_exhaustion(
+            "agy:model:none", "2099-01-01T00:00:00", "confirmed", "job-0", "2026-07-27T00:00:00",
+            db_path=self.db_path,
+        )
+        mock_spawn = AsyncMock()
+        with patch("cadet.jobs.dispatcher.spawn_agy", mock_spawn):
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-a")
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-b")
+
+        mock_spawn.assert_not_called()
+        self.assertEqual(job_store.get_job("job-a", db_path=self.db_path)["status"], "failed")
+        self.assertEqual(job_store.get_job("job-b", db_path=self.db_path)["status"], "failed")
+
+    async def test_real_quota_failure_populates_provider_status_confirmed(self):
+        _, stderr_log_path = self._create_pending_job()
+        with open(stderr_log_path, "w", encoding="utf-8") as f:
+            f.write("Error: Individual quota reached. Please upgrade. Resets in 5m.\n")
+
+        with patch("cadet.jobs.dispatcher.spawn_agy", AsyncMock(return_value=_make_proc(wait_return=1))):
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-1")
+
+        row = provider_status_store.get_status("agy:model:none", db_path=self.db_path)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["confidence"], "confirmed")
+        self.assertIsNotNone(row["quota_reset_at"])
+
+    async def test_real_quota_failure_with_no_vendor_eta_populates_estimated(self):
+        self.dispatcher = Dispatcher(
+            executable_paths={"agy": "C:\\tools\\agy.exe", "cursor": "cadet-cursor:latest"},
+            max_concurrent=2, db_path=self.db_path,
+        )
+        _, stderr_log_path = self._create_pending_job(provider="cursor")
+        with open(stderr_log_path, "w", encoding="utf-8") as f:
+            f.write("ActionRequiredError: You've hit your usage limit Get Cursor Pro for more Agent usage.\n")
+
+        with patch("cadet.jobs.dispatcher.spawn_cursor", AsyncMock(return_value=_make_proc(wait_return=1))):
+            await self.dispatcher._semaphore.acquire()
+            await self.dispatcher.run_job("job-1")
+
+        job = job_store.get_job("job-1", db_path=self.db_path)
+        self.assertEqual(job["error_kind"], "quota_exhausted")
+        self.assertEqual(job["quota_reset_confidence"], "estimated")
+        self.assertIsNotNone(job["quota_reset_at"])
+
+        row = provider_status_store.get_status("cursor", db_path=self.db_path)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["confidence"], "estimated")
 
 
 class TestCancel(DispatcherTestCase):

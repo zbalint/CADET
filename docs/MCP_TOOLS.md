@@ -44,10 +44,17 @@ queued/dispatched.
 | `model` | str | `CADET_AGY_MODEL` (or `CADET_<PROVIDER>_MODEL`) | Passed through as the provider's own `--model` flag. Lets a caller pin a specific tier (e.g. `gemini-3.6-flash-low` for trivial work vs `-high` for harder tasks) instead of always using the configured default. Free-form string, not validated against a known-model list — a mismatched provider/model pair surfaces as a subprocess failure, not a pre-flight error. |
 | `effort` | str | `CADET_AGY_EFFORT` (or `CADET_<PROVIDER>_EFFORT`) | Passed through as the provider's own `--effort`-equivalent flag (`low`\|`medium`\|`high`), where the provider supports one. |
 | `skip_permissions` | bool | `false` | Passed through as agy's `--dangerously-skip-permissions` when `true` (only meaningful for the `agy` provider today). Default `false` deliberately — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-agy-cli-behavior). **This is stronger than "removes the soft-deny":** confirmed via `google-antigravity/antigravity-cli#36` (open/unpatched) that it also silently defeats CADET's `--sandbox` flag entirely — with `skip_permissions=True` there is effectively **zero** containment, not partial. Run `cadet-install-agy-permissions` (see [CONFIGURATION.md](./CONFIGURATION.md)) first — most ordinary CADET jobs (tests, read-only git) shouldn't need `skip_permissions=True` at all once the curated allow-list is installed. Only set `true` for tasks in a `cwd` you're comfortable giving fully unrestricted tool access to. |
+| `skip_quota_check` | bool | `false` | Bypasses the [pre-flight quota gate](./ARCHITECTURE.md#pre-flight-quota-gate) for this call — use when a recorded exhaustion is known-stale (manual quota reset, account upgrade). Default `false`: if the target provider/model's quota pool is already known-exhausted, `delegate_task` fails immediately with `{"error": ..., "error_kind": "quota_exhausted", "quota_reset_at": ..., "quota_reset_confidence": ...}` and creates no job row at all — no Docker container, no real vendor call. |
 
-**Returns:** `{job_id, status, context_id, queue_position, label, created_at}`
+**Returns (success):** `{job_id, status, context_id, queue_position, label, created_at}`
 - `status` is `"pending"` or `"running"` depending on whether a concurrency slot was free.
 - `queue_position` is `null` unless `status == "pending"`.
+
+**Returns (pre-flight quota block):** `{error, error_kind: "quota_exhausted", quota_reset_at, quota_reset_confidence}` —
+see [ARCHITECTURE.md](./ARCHITECTURE.md#pre-flight-quota-gate) for what `quota_reset_confidence`
+(`confirmed`|`estimated`|`unknown`) means. This fast-path check is a courtesy only — the real
+enforcement lives in the dispatcher, so a pool can still become exhausted and block the job later
+even if this call returned success.
 
 ### `check_task_status`
 
@@ -55,15 +62,20 @@ Cheap poll: a single SQLite row read, **no log file I/O**. Safe to call frequent
 
 **Params:** `job_id` (str, required).
 
-**Returns:** `{job_id, label, context_id, status, provider, model, effort, skip_permissions, created_at, started_at, elapsed_s, exit_code, error_kind, quota_reset_at, timeout_s, queue_position}`
+**Returns:** `{job_id, label, context_id, status, provider, model, effort, skip_permissions, skip_quota_check, created_at, started_at, elapsed_s, exit_code, error_kind, quota_reset_at, quota_reset_confidence, timeout_s, queue_position}`
 - `elapsed_s` = `now - started_at` while `running`, `finished_at - started_at` once terminal,
   `null` while still `pending`.
 - `error_kind` is `null` for non-failed jobs, or a best-effort classification such as
   `"quota_exhausted"` (see [ARCHITECTURE.md](./ARCHITECTURE.md#quota-exhaustion-detection)) —
   absence of a classification does not mean the failure is understood, only that it didn't match a
-  known pattern.
+  known pattern. A job blocked by the [pre-flight quota gate](./ARCHITECTURE.md#pre-flight-quota-gate)
+  before ever spawning also shows `"quota_exhausted"` here — check `quota_reset_confidence` to tell
+  a real vendor-reported block from a CADET-estimated one.
 - `quota_reset_at` (ISO8601) is set only alongside `error_kind == "quota_exhausted"`; `model` tells
   you which of Antigravity's quota pools that reset applies to.
+- `quota_reset_confidence` is `"confirmed"` (the vendor's own message gave this timestamp),
+  `"estimated"` (CADET guessed it from researched billing-cycle behavior — see
+  [CONFIGURATION.md](./CONFIGURATION.md#pre-flight-quota-gate)), or `"unknown"`/`null`.
 
 ### `get_task_output`
 
@@ -76,11 +88,12 @@ Reads log files. Safe to call on a still-running job — it peeks at whatever's 
 | `job_id` | str | required | |
 | `tail_lines` | int | `None` (full output) | If set, returns only the last N lines of each stream. |
 
-**Returns:** `{job_id, status, stdout, stderr, exit_code, error_kind, quota_reset_at, duration_s, truncated, stdout_log_path, stderr_log_path}`
+**Returns:** `{job_id, status, stdout, stderr, exit_code, error_kind, quota_reset_at, quota_reset_confidence, duration_s, truncated, stdout_log_path, stderr_log_path}`
 - Log paths are always included (free — already tracked in the job store) as an escape hatch: if
   `tail_lines` isn't enough, Claude can `Read` the full file directly.
-- `error_kind`/`quota_reset_at` mirror `check_task_status` — see
-  [ARCHITECTURE.md](./ARCHITECTURE.md#quota-exhaustion-detection).
+- `error_kind`/`quota_reset_at`/`quota_reset_confidence` mirror `check_task_status` — see
+  [ARCHITECTURE.md](./ARCHITECTURE.md#quota-exhaustion-detection) and
+  [ARCHITECTURE.md](./ARCHITECTURE.md#pre-flight-quota-gate).
 
 ### `list_tasks`
 
@@ -114,8 +127,13 @@ status rather than erroring.
   `context_id` instead of relying on `agy` cold-reading SALTMDB every time. Not included because
   it's unverified whether `-p` (print) mode exposes a capturable conversation ID after a run — see
   [ARCHITECTURE.md](./ARCHITECTURE.md#open-questions--risks-unresolved--flagged-for-whoever-implements-next).
+- A `get_provider_status`/`list_provider_status` tool for querying the
+  [pre-flight quota gate](./ARCHITECTURE.md#pre-flight-quota-gate)'s `provider_status` table
+  directly — not needed because `delegate_task`'s own fast-path already returns the block reason
+  synchronously when it matters, and `check_task_status`/`list_tasks`/`get_task_output` already
+  surface `error_kind`/`quota_reset_at`/`quota_reset_confidence` per job.
 
-All three are easy, low-risk additions later if the underlying question is resolved — not built
+All four are easy, low-risk additions later if the underlying question is resolved — not built
 now (YAGNI).
 
 ## Companion script: `cadet-wait-for-job` (not an MCP tool)

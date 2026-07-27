@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from cadet import config
-from cadet.db import job_store
+from cadet.db import job_store, provider_status_store
 from cadet.db.schema import init_db
 from cadet.jobs.dispatcher import Dispatcher
 from cadet.mcp import tools
@@ -128,6 +128,30 @@ class TestDelegateTask(McpToolsTestCase):
             self.assertIsNone(result["queue_position"])
             release_event.set()
             await asyncio.sleep(0.05)
+
+
+class TestDelegateTaskQuotaGate(McpToolsTestCase):
+    async def test_fast_path_blocks_without_creating_a_job(self):
+        provider_status_store.upsert_exhaustion(
+            "agy:model:none", "2099-01-01T00:00:00", "confirmed", "job-0", "2026-07-27T00:00:00",
+            db_path=self.db_path,
+        )
+        result = await tools.delegate_task(prompt="x", cwd=self.scratch_cwd)
+
+        self.assertEqual(result["error_kind"], "quota_exhausted")
+        self.assertEqual(result["quota_reset_at"], "2099-01-01T00:00:00")
+        self.assertEqual(result["quota_reset_confidence"], "confirmed")
+        self.assertEqual(len(tools.list_tasks()), 0)
+
+    async def test_skip_quota_check_bypasses_fast_path(self):
+        provider_status_store.upsert_exhaustion(
+            "agy:model:none", "2099-01-01T00:00:00", "confirmed", "job-0", "2026-07-27T00:00:00",
+            db_path=self.db_path,
+        )
+        result = await tools.delegate_task(prompt="x", cwd=self.scratch_cwd, skip_quota_check=True)
+
+        self.assertNotIn("error", result)
+        self.assertEqual(result["status"], "pending")
 
 
 class TestCheckTaskStatus(McpToolsTestCase):

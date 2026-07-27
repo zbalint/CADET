@@ -500,10 +500,12 @@ command in [JOB_LIFECYCLE.md](./JOB_LIFECYCLE.md) is built around, not assumptio
   ```
   Error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 94h31m53s.
   ```
-  Antigravity tracks (at least) two independent quota pools — one for Gemini models, one for
-  Claude models selectable via `--model` — so a `quota_exhausted` failure is scoped to whichever
-  pool the job's requested `model` draws from, not global. See "Quota exhaustion detection" below
-  for how CADET surfaces this.
+  Antigravity tracks (at least) two independent quota pools selectable via `--model`: a Gemini
+  pool (`gemini-3.6-flash-*`, `gemini-3.5-flash-*`, `gemini-3.1-pro-*`) and a Claude+GPT pool
+  (`claude-sonnet-4-6`, `claude-opus-4-6-thinking`, `gpt-oss-120b-medium` — GPT-oss shares the
+  Claude pool, it is not a third standalone pool) — so a `quota_exhausted` failure is scoped to
+  whichever pool the job's requested `model` draws from, not global. See "Quota exhaustion
+  detection" and "Pre-flight quota gate" below for how CADET surfaces and acts on this.
 
 ## Validated `agy` container behavior
 
@@ -835,11 +837,62 @@ does best-effort detection rather than treating every failure as opaque:
   correctness requirement. `error_message`/the raw log files remain available regardless via
   `get_task_output`, so nothing is lost if the vendor changes this wording in a future `agy`
   version and the pattern silently stops matching.
-- **CADET does not act on this itself** (no auto-pausing dispatch, no remembering reset times
-  across jobs) — it only surfaces `error_kind`/`quota_reset_at` as facts on the job record via
-  `check_task_status`/`get_task_output`/`list_tasks` (see [MCP_TOOLS.md](./MCP_TOOLS.md)) for
-  Claude to act on — e.g. switching a subsequent `delegate_task`'s `model` to the other pool, or
-  logging the reset ETA to SALTMDB so other sessions don't rediscover it the hard way.
+- This detection is the **write side** of the pre-flight quota gate (see below): a
+  `quota_exhausted` failure here also updates the `provider_status` table for that pool, so the
+  *next* dispatched job against the same pool gets blocked before ever spawning a process. CADET
+  still surfaces `error_kind`/`quota_reset_at`/`quota_reset_confidence` as facts on the job record
+  via `check_task_status`/`get_task_output`/`list_tasks` (see [MCP_TOOLS.md](./MCP_TOOLS.md)) for
+  Claude to act on beyond that — e.g. switching a subsequent `delegate_task`'s `model` to the other
+  pool, or logging the reset ETA to SALTMDB so other sessions don't rediscover it the hard way.
+
+## Pre-flight quota gate
+
+CADET exists to let a calling assistant burn a *provider's* quota instead of its own tokens — so
+dispatching into a pool already known to be dead wastes a real Docker spawn and a real vendor call
+for a foregone conclusion. The gate closes that gap, living entirely inside CADET (not assistant
+discipline) so it protects every caller regardless of whether the caller remembers to check first.
+
+- **Storage**: a new `provider_status` table (`src/cadet/db/schema.py`), one row per quota **pool**
+  (`src/cadet/process/quota_pool.py::resolve_pool_key`) — `codex`/`cursor`/`copilot` are each their
+  own pool; `agy` resolves to `agy:gemini` or `agy:claude_gpt` by model-name prefix (an unrecognized
+  or missing agy model gets its own `agy:model:<literal>` bucket rather than defaulting into either
+  real pool, to avoid ever silently cross-blocking). Columns: `quota_reset_at` (nullable), a
+  `confidence` label (`confirmed`|`estimated`|`unknown`), `source_job_id`, `updated_at`. Read/write
+  helpers live in `src/cadet/db/provider_status_store.py`; writes are plain last-write-wins
+  UPSERTs (a single-row cache, not a ledger — concurrent writers on the same pool are deriving from
+  the same real event, so no conditional-write contention is needed here, unlike every `jobs`-table
+  write).
+- **Write side**: in `Dispatcher.run_job` (`src/cadet/jobs/dispatcher.py`), any real spawn failure
+  classified `error_kind = "quota_exhausted"` upserts its pool's row. If the vendor's own message
+  gave a real reset timestamp (`agy` always, `codex` sometimes), confidence is `confirmed`.
+  Otherwise `quota_pool.estimate_reset()` supplies a heuristic reset time labeled `estimated` (see
+  [CONFIGURATION.md](./CONFIGURATION.md#pre-flight-quota-gate) for the researched per-vendor
+  cadences and the `CADET_CURSOR_BILLING_ANCHOR_DAY`/`CADET_COPILOT_BILLING_ANCHOR_DAY` overrides),
+  or `unknown` with no reset time in `agy`'s defensive fallback branch (only reachable if a future
+  vendor format change breaks its duration regex — there's no real cadence data to guess from, so
+  it deliberately doesn't invent one).
+- **Read side (the actual gate)**: `src/cadet/jobs/quota_gate.py::check_quota_gate` is called in
+  `run_job`, right after the existing pending-status re-check and before the prompt file is opened
+  — the earliest safe point, so a blocked job never creates log files it'll never use. If the
+  job's pool has a recorded, not-yet-expired block, the job is marked `failed` /
+  `error_kind: "quota_exhausted"` directly (`job_store.block_quota_exhausted` — a new function,
+  since `finalize_terminal` requires `status = 'running'` and would silently no-op here, while
+  `force_fail` doesn't persist the quota columns) **without ever calling the provider's `spawn_fn`**.
+  An `unknown`-confidence row, or one whose `quota_reset_at` has already passed, fails **open**
+  (self-healing: an expired row is opportunistically cleared). This also means a job already sitting
+  in the dispatch queue when its pool becomes exhausted gets gated for free the moment its
+  concurrency slot frees, with no extra plumbing.
+- **Escape hatch**: `delegate_task`'s `skip_quota_check=True` bypasses the gate for that call,
+  mirroring `skip_permissions` exactly (typed param → `_resolve`/`_coerce_bool` → persisted on the
+  `jobs` row, since `run_job` re-fetches the row independently of `delegate_task`'s in-memory
+  state). `delegate_task` also runs the same `check_quota_gate` as a **courtesy fast-path** before
+  even enqueueing, purely so a caller gets an immediate answer instead of round-tripping through
+  `check_task_status` — this is UX sugar only; the `run_job` gate is the sole load-bearing
+  enforcement, since the pool can still become exhausted after the fast path passes but before a
+  deep queue actually dispatches.
+- **No new MCP tool.** `docs/MCP_TOOLS.md`'s "five tools, deliberately minimal" framing is
+  preserved — blocked-state is surfaced through the `error_kind`/`quota_reset_at`/
+  `quota_reset_confidence` fields `check_task_status`/`get_task_output`/`list_tasks` already return.
 
 ## The polling-forgetfulness problem
 
@@ -865,11 +918,12 @@ than CADET building a new notification channel of its own.
    actual limit needs an empirical test before relying on very long prompts.
 3. **Single-instance assumption** — running two CADET servers against the same `CADET_STATE_DIR`
    is unsupported/undefined (no file-locking or multi-writer coordination is designed for this).
-4. **No pre-flight quota visibility** — CADET can detect quota exhaustion *after the fact* (see
-   "Quota exhaustion detection" above) but still can't check remaining quota before dispatching a
-   job. The parsed `Resets in <duration>` format is current as of `agy` v1.1.7 and could change in
-   a future version; if it does, detection just silently stops populating `error_kind` rather than
-   breaking anything, and the raw stderr text is still visible via `get_task_output`.
+4. ~~**No pre-flight quota visibility**~~ — **Resolved.** See "Pre-flight quota gate" above: a
+   `provider_status` table plus a `run_job`-side check now block dispatch into an already-known-
+   exhausted pool before ever spawning. The parsed `Resets in <duration>` format is current as of
+   `agy` v1.1.7 and could change in a future version; if it does, detection just silently stops
+   populating `error_kind` (and the gate simply has nothing new to block on) rather than breaking
+   anything, and the raw stderr text is still visible via `get_task_output`.
 5. **`cadet-install-agy-permissions` writes to a single global, shared file.** `agy` has no
    `--settings <path>` flag and no confirmed per-project permission scoping — the curated
    allow-list and the user's own interactive `agy` permission history necessarily live in the

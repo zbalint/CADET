@@ -141,6 +141,16 @@ def get_cursor_stop_grace_s() -> int:
     return int(os.environ.get("CADET_CURSOR_STOP_GRACE_S", "10"))
 
 
+def get_cursor_billing_anchor_day():
+    """Day-of-month (1-28) Cursor's quota resets on, if known -- Cursor resets
+    on the account's individual billing-cycle anniversary date, not the
+    calendar month, and CADET has no way to discover that day on its own.
+    Unset by default; the pre-flight quota gate falls back to a conservative
+    fixed-window estimate when this isn't configured."""
+    val = os.environ.get("CADET_CURSOR_BILLING_ANCHOR_DAY")
+    return int(val) if val else None
+
+
 def get_copilot_docker_image() -> str:
     return os.environ.get("CADET_COPILOT_DOCKER_IMAGE", "cadet-copilot:latest")
 
@@ -167,6 +177,16 @@ def get_copilot_container_pids_limit() -> int:
 
 def get_copilot_stop_grace_s() -> int:
     return int(os.environ.get("CADET_COPILOT_STOP_GRACE_S", "10"))
+
+
+def get_copilot_billing_anchor_day():
+    """Day-of-month (1-28) Copilot's quota resets on, if known -- confirmed
+    default is the 1st of the calendar month at 00:00 UTC (the pre-flight
+    quota gate's "next 1st of month" fallback already matches this). Only
+    needed as an override for an account on a different cadence (e.g.
+    enterprise/proration edge cases); most accounts don't need to set this."""
+    val = os.environ.get("CADET_COPILOT_BILLING_ANCHOR_DAY")
+    return int(val) if val else None
 
 
 def _resolve_docker_image(image: str, build_hint: str) -> str:

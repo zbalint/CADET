@@ -2,7 +2,9 @@ import asyncio
 import datetime as dt
 
 from cadet import config
-from cadet.db import job_store
+from cadet.db import job_store, provider_status_store
+from cadet.jobs import quota_gate
+from cadet.process import quota_pool
 from cadet.process.providers.agy import spawn as spawn_agy, parse_error as parse_error_agy
 from cadet.process.providers.codex import spawn as spawn_codex, parse_error as parse_error_codex, stop as stop_codex_container
 from cadet.process.providers.cursor import spawn as spawn_cursor, parse_error as parse_error_cursor, stop as stop_cursor_container
@@ -86,6 +88,22 @@ class Dispatcher:
                 # that raced in while this job was still queued.
                 return
 
+            if not bool(job["skip_quota_check"]):
+                block = quota_gate.check_quota_gate(
+                    job["provider"] or "agy", job["model"], db_path=self.db_path,
+                )
+                if block is not None:
+                    job_store.block_quota_exhausted(
+                        job_id, error_kind="quota_exhausted", quota_reset_at=block["quota_reset_at"],
+                        confidence=block["confidence"],
+                        error_message=(
+                            f"CADET pre-flight quota gate: {block['pool_key']} blocked until "
+                            f"{block['quota_reset_at'] or 'unknown'} ({block['confidence']})"
+                        ),
+                        finished_at=_now_iso(), db_path=self.db_path,
+                    )
+                    return
+
             with open(job["prompt_path"], "r", encoding="utf-8") as f:
                 prompt_text = f.read()
 
@@ -133,6 +151,7 @@ class Dispatcher:
             error_message = None
             error_kind = None
             quota_reset_at = None
+            confidence = None
 
             if job_id in self._cancel_flags:
                 status = "cancelled"
@@ -153,11 +172,24 @@ class Dispatcher:
                 )
                 error_message = f"{provider_name} exited {exit_code}"
 
+                if error_kind == "quota_exhausted":
+                    if quota_reset_at is not None:
+                        confidence = "confirmed"
+                    else:
+                        quota_reset_at, confidence = quota_pool.estimate_reset(provider_name, finished_at)
+
             job_store.finalize_terminal(
                 job_id, status=status, exit_code=exit_code, finished_at=finished_at,
                 error_message=error_message, error_kind=error_kind,
-                quota_reset_at=quota_reset_at, db_path=self.db_path,
+                quota_reset_at=quota_reset_at, confidence=confidence, db_path=self.db_path,
             )
+
+            if error_kind == "quota_exhausted":
+                pool_key = quota_pool.resolve_pool_key(provider_name, job["model"])
+                provider_status_store.upsert_exhaustion(
+                    pool_key, quota_reset_at, confidence, source_job_id=job_id,
+                    updated_at=finished_at, db_path=self.db_path,
+                )
         except Exception as exc:  # defensive: run_job must always finalize or no-op cleanly
             # May fire before or after mark_running, so use the more permissive
             # (pending-or-running) conditional write rather than finalize_terminal.

@@ -63,6 +63,7 @@ shape as `agy`'s Phase 2), not a plain API key — see `cadet-setup-cursor-docke
 | `CADET_CURSOR_MODEL` | `auto` | Passed through as `agent --model` unless overridden per-call by `delegate_task`'s `model` param. **Always passed explicitly** (never omitted) — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior) for why omitting `--model` is unsafe (it inherits a sticky global default from `~/.cursor/cli-config.json` instead of a stateless vendor default). Free-tier accounts can only use `auto`; named models require a paid plan. |
 | `CADET_CURSOR_EFFORT` | none (no effort applied) | Applied as a bracket override on the model string (`<model>[effort=<value>]`) only when a model is also set. **UNCONFIRMED** against a real call — see [ARCHITECTURE.md](./ARCHITECTURE.md#validated-cursor-cli-behavior). |
 | `CADET_CURSOR_SANDBOX` | `true` | Whether `sandbox=True` maps to `--mode plan` (genuinely read-only, confirmed on both Windows and inside the Linux container via two real live calls — see [ARCHITECTURE.md](./ARCHITECTURE.md#containerized-cursor-execution)) vs. omitting `--mode` entirely. The `/workspace` bind mount's `:ro`/`:rw` distinction backs the read-only/read-write semantics regardless of what the CLI flag itself does. |
+| `CADET_CURSOR_BILLING_ANCHOR_DAY` | none | Day-of-month (1-28) this account's Cursor quota resets on. Cursor's own error message never includes a reset ETA, and it resets on the account's individual billing-cycle anniversary date, not the calendar month — CADET has no way to discover that day on its own. See [Pre-flight quota gate](./ARCHITECTURE.md#pre-flight-quota-gate). One real data point: a user-confirmed reset date of Aug 26, 2026 (checked directly in the Cursor app) matches `CADET_CURSOR_BILLING_ANCHOR_DAY=26` exactly. |
 
 ### `copilot` provider env vars
 
@@ -86,6 +87,7 @@ token env var as a simpler override — see `cadet-setup-copilot-docker` below.
 | `CADET_COPILOT_MODEL` | `auto` | Passed through as `copilot --model` unless overridden per-call by `delegate_task`'s `model` param. **Always passed explicitly**, defensively mirroring `cursor` (not confirmed to have the same sticky-global-default bug, but costs nothing to avoid relying on unconfirmed default behavior). |
 | `CADET_COPILOT_EFFORT` | none (no effort applied) | Passed through as `copilot --effort <value>` unless overridden per-call. One of `none`\|`minimal`\|`low`\|`medium`\|`high`\|`xhigh`\|`max`. **Confirmed to hard-error when combined with `model="auto"`** (`Error: Model "auto" does not support reasoning effort configuration...`) — pair with a real `CADET_COPILOT_MODEL`/`model` if setting this. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
 | `CADET_COPILOT_SANDBOX` | `true` | Whether `sandbox=True` (with `skip_permissions=False`) maps to `--mode plan --deny-tool shell` (genuinely read-only, confirmed on native Windows — **unconfirmed inside the Linux container**) vs. omitting both flags. **Unlike `codex`/`cursor`, `sandbox=False` with `skip_permissions=False` is not a known-broken combo here** — it behaves identically to `skip_permissions=True` (real edits) because `--allow-all-tools` is always passed (required for non-interactive mode to function at all) and `--mode plan --deny-tool shell`'s presence/absence is the only actual write gate. See [ARCHITECTURE.md](./ARCHITECTURE.md#validated-copilot-cli-behavior). |
+| `CADET_COPILOT_BILLING_ANCHOR_DAY` | none | Day-of-month (1-28) this account's Copilot quota resets on. Copilot's own error message never includes a reset ETA, but the reset itself is **confirmed**: 1st of the calendar month at 00:00 UTC, for every account — the gate's default fallback ("next 1st of month") already matches this without needing to set anything. Only set this if your account is on a different cadence (e.g. enterprise/proration edge cases). See [Pre-flight quota gate](./ARCHITECTURE.md#pre-flight-quota-gate). |
 
 ### Provider status summary
 
@@ -289,15 +291,41 @@ scheduler), CADET sweeps: any job row in a terminal state (`succeeded`, `failed`
 has its `logs/<job_id>/` directory deleted and its DB row removed. `pending`/`running` rows are
 never swept regardless of age.
 
-## No pre-flight quota visibility
+## Pre-flight quota gate
 
-There is no `agy` CLI command or flag that reports remaining Antigravity subscription quota before
-dispatching a job — it's only visible in the interactive TUI, and CADET cannot check it ahead of
-time. It *can*, however, detect quota exhaustion after the fact: a job that fails because a quota
-pool (Gemini or Claude models are tracked separately) is depleted gets `error_kind:
-"quota_exhausted"` and a parsed `quota_reset_at` timestamp on its record (see
-[ARCHITECTURE.md](./ARCHITECTURE.md#quota-exhaustion-detection)) — CADET does not, however, act on
-this itself (no auto-pausing dispatch); it's exposed for Claude to decide policy on.
+There is no `agy`/codex/cursor/copilot CLI command or flag that reports remaining quota before
+dispatching a job — none of the four vendors expose that ahead of time. CADET compensates with a
+pre-flight gate rather than relying only on after-the-fact detection: every real spawn failure
+whose `parse_error` result is `error_kind: "quota_exhausted"` (see
+[ARCHITECTURE.md](./ARCHITECTURE.md#quota-exhaustion-detection)) writes the exhausted pool's state
+into a `provider_status` table, keyed by quota *pool* rather than raw provider name — `agy` has two
+independent pools (Gemini models vs. Claude+GPT models, distinguished by model-name prefix), while
+codex/cursor/copilot each have exactly one. Before spawning any job, the dispatcher checks that
+table first (see [ARCHITECTURE.md](./ARCHITECTURE.md#pre-flight-quota-gate)) and fails the job
+immediately — with no Docker container, no real vendor API call — if the target pool is still
+within its recorded (or expired) exhaustion window.
+
+Every recorded/returned reset time carries a `quota_reset_confidence` label:
+- **`confirmed`** — the vendor's own error message for that specific failure gave a real
+  timestamp (`agy` always; `codex` sometimes, since its absolute-date reset message doesn't always
+  parse).
+- **`estimated`** — no vendor ETA was given (`cursor`/`copilot` always; `codex` on the rare
+  unparseable case), so CADET estimates one from researched vendor billing-cycle behavior:
+  `codex` falls back to a 7-day rolling window, `cursor` falls back to a 30-day window (a genuine
+  guess — Cursor resets on each account's own billing-cycle anniversary date, which CADET has no
+  way to discover on its own), `copilot` falls back to "next 1st of month" (a **confirmed** vendor
+  policy — 00:00 UTC on the 1st, for every account — just still labeled `estimated` because CADET's
+  local-time handling can put the computed instant up to a few hours off the real UTC boundary; see
+  `quota_pool._next_monthly_anchor`). `CADET_CURSOR_BILLING_ANCHOR_DAY`/
+  `CADET_COPILOT_BILLING_ANCHOR_DAY` override either default for an account on a different cadence.
+- **`unknown`** — no principled reset time exists at all (only reachable via `agy`'s defensive
+  fallback, in case a future vendor message format change breaks its duration-parsing regex). The
+  gate deliberately fails **open** on `unknown` rather than blocking forever on a guess it can't
+  even make.
+
+`delegate_task`'s `skip_quota_check=True` bypasses the gate entirely for that call — an escape
+hatch for when the recorded state is known-stale (e.g. a manual out-of-band quota reset, or an
+account upgrade), mirroring `skip_permissions`.
 
 ## Single-instance assumption
 

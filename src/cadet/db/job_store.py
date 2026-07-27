@@ -10,7 +10,7 @@ def _row_to_dict(row):
 def insert_job(
     job_id, context_id, label, prompt_path, cwd, model, effort, skip_permissions,
     status, created_at, timeout_s, stdout_log_path, stderr_log_path,
-    provider="agy", db_connection=None, db_path=None,
+    provider="agy", skip_quota_check=False, db_connection=None, db_path=None,
 ) -> None:
     with managed_connection(db_connection, db_path) as conn:
         with conn:
@@ -18,13 +18,14 @@ def insert_job(
                 """
                 INSERT INTO jobs (
                     job_id, context_id, label, prompt_path, cwd, provider, model, effort,
-                    skip_permissions, status, created_at, timeout_s,
+                    skip_permissions, skip_quota_check, status, created_at, timeout_s,
                     stdout_log_path, stderr_log_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id, context_id, label, prompt_path, cwd, provider, model, effort,
-                    1 if skip_permissions else 0, status, created_at, timeout_s,
+                    1 if skip_permissions else 0, 1 if skip_quota_check else 0,
+                    status, created_at, timeout_s,
                     stdout_log_path, stderr_log_path,
                 ),
             )
@@ -51,18 +52,42 @@ def mark_running(job_id, pid, started_at, db_connection=None, db_path=None) -> b
 
 def finalize_terminal(
     job_id, status, exit_code=None, finished_at=None, error_message=None,
-    error_kind=None, quota_reset_at=None, db_connection=None, db_path=None,
+    error_kind=None, quota_reset_at=None, confidence=None, db_connection=None, db_path=None,
 ) -> bool:
     """The single conditional terminal-state write. Only succeeds if the row is
     still 'running' — whichever of {subprocess exit, timeout handler, cancel}
-    gets rowcount==1 here won the race and owns finalization."""
+    gets rowcount==1 here won the race and owns finalization. `confidence`
+    labels quota_reset_at as vendor-"confirmed" vs CADET-"estimated" (see
+    cadet.process.quota_pool.estimate_reset) so callers can tell fact from guess."""
     with managed_connection(db_connection, db_path) as conn:
         with conn:
             cur = conn.execute(
                 "UPDATE jobs SET status = ?, exit_code = ?, finished_at = ?, "
-                "error_message = ?, error_kind = ?, quota_reset_at = ? "
+                "error_message = ?, error_kind = ?, quota_reset_at = ?, quota_reset_confidence = ? "
                 "WHERE job_id = ? AND status = 'running'",
-                (status, exit_code, finished_at, error_message, error_kind, quota_reset_at, job_id),
+                (status, exit_code, finished_at, error_message, error_kind, quota_reset_at, confidence, job_id),
+            )
+            return cur.rowcount == 1
+
+
+def block_quota_exhausted(
+    job_id, error_kind, quota_reset_at, confidence, error_message, finished_at,
+    db_connection=None, db_path=None,
+) -> bool:
+    """Pre-flight gate write: marks a job 'failed' without it ever having
+    spawned a process. Unlike finalize_terminal (scoped to 'running' — never
+    matches here, since the gate fires before mark_running), and unlike
+    force_fail (matches pending-or-running but doesn't persist error_kind/
+    quota_reset_at at all), this is scoped strictly to 'pending' (the gate
+    only ever runs pre-mark_running) and writes the full quota-exhaustion
+    payload the pre-flight feature exists to surface."""
+    with managed_connection(db_connection, db_path) as conn:
+        with conn:
+            cur = conn.execute(
+                "UPDATE jobs SET status = 'failed', finished_at = ?, error_message = ?, "
+                "error_kind = ?, quota_reset_at = ?, quota_reset_confidence = ? "
+                "WHERE job_id = ? AND status = 'pending'",
+                (finished_at, error_message, error_kind, quota_reset_at, confidence, job_id),
             )
             return cur.rowcount == 1
 
