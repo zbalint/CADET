@@ -130,6 +130,7 @@ async def delegate_task(
     job_store.insert_job(
         job_id=job_id, context_id=context_id_, label=label_, prompt_path=prompt_path,
         cwd=cwd_, provider=provider_, model=model_, effort=effort_, skip_permissions=skip_permissions_,
+        skip_quota_check=skip_quota_check_,
         status="pending", created_at=created_at, timeout_s=timeout_s_,
         stdout_log_path=stdout_log_path, stderr_log_path=stderr_log_path,
     )

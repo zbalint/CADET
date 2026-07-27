@@ -152,6 +152,13 @@ class TestDelegateTaskQuotaGate(McpToolsTestCase):
 
         self.assertNotIn("error", result)
         self.assertEqual(result["status"], "pending")
+        # Regression: skip_quota_check_ must actually be persisted on the job row,
+        # not just used for the synchronous fast-path above -- otherwise the
+        # dispatcher-side gate in run_job (which reads job["skip_quota_check"]
+        # back from storage) re-blocks the job anyway, silently defeating the
+        # escape hatch this test name promises.
+        job = job_store.get_job(result["job_id"], db_path=self.db_path)
+        self.assertEqual(job["skip_quota_check"], 1)
 
 
 class TestCheckTaskStatus(McpToolsTestCase):
