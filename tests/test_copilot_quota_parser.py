@@ -3,17 +3,35 @@ import unittest
 from cadet.process.providers.copilot import parse_error
 
 # NOTE: this exact wording is UNCONFIRMED (see copilot.py's module docstring) —
-# no real quota exhaustion was observed during empirical validation. These
-# tests cover the parser's mechanics against a plausible shape, not a
-# vendor-verified string.
+# kept as a fallback shape. These tests cover the parser's mechanics against a
+# plausible shape, not a vendor-verified string.
 PLAUSIBLE_QUOTA_STDERR = "Error: usage limit reached. Try again in 5h30m.\n"
+
+# Real stderr text captured 2026-07-27 during live multi-provider stress-testing
+# (two separate real delegate_task calls against a genuinely exhausted free-tier
+# account) — see copilot.py's module docstring. No reset-time/ETA in the message.
+REAL_QUOTA_STDERR = (
+    "\nYou have exceeded your monthly quota (Request ID: F8E9:3E4679:5157DBA:5AF7631:6A674FBD)\n"
+)
 
 
 class TestParseError(unittest.TestCase):
+    def test_matches_real_confirmed_wording_with_no_reset_eta(self):
+        error_kind, quota_reset_at = parse_error(REAL_QUOTA_STDERR, "2026-07-26T00:00:00")
+        self.assertEqual(error_kind, "quota_exhausted")
+        self.assertIsNone(quota_reset_at)
+
     def test_matches_plausible_wording(self):
         error_kind, quota_reset_at = parse_error(PLAUSIBLE_QUOTA_STDERR, "2026-07-26T00:00:00")
         self.assertEqual(error_kind, "quota_exhausted")
         self.assertEqual(quota_reset_at, "2026-07-26T05:30:00")
+
+    def test_stdout_tail_is_also_scanned(self):
+        # Defensive: copilot's confirmed message arrives via stderr, but the
+        # parser should not ignore stdout if it ever showed up there instead.
+        error_kind, quota_reset_at = parse_error("", "2026-07-26T00:00:00", stdout_tail=REAL_QUOTA_STDERR)
+        self.assertEqual(error_kind, "quota_exhausted")
+        self.assertIsNone(quota_reset_at)
 
     def test_no_match_returns_none_none(self):
         stderr = "Error: Exit code: 1\nsome unrelated failure"

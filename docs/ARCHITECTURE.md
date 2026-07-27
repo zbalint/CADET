@@ -640,11 +640,18 @@ invocations against a scratch directory, not vendor docs alone:
 - **`-m/--model` and `-c model_reasoning_effort=<value>` both confirmed to parse and take
   effect** via a real invocation (`-m gpt-5.6-terra -c model_reasoning_effort=low`, matching the
   field name already used in the user's own `~/.codex/config.toml`).
-- **No confirmed quota-exhaustion wording.** Unlike `agy`'s reproduced "Individual quota reached"
-  string, no real quota exhaustion was observed during validation (forcing one would burn real
-  quota). `providers/codex.py`'s `parse_error` has a best-effort regex based on community reports
-  of "usage limit reached" phrasing, explicitly marked unconfirmed in its docstring — same
-  opportunistic-enrichment posture as `agy`'s parser, not a correctness requirement.
+- **Confirmed quota-exhaustion wording as of 2026-07-27** (real account, hit during live
+  multi-provider stress-testing): `"You've hit your usage limit. Upgrade to Plus to continue using
+  Codex (https://chatgpt.com/explore/plus), or try again at Aug 25th, 2026 4:25 PM."` — exit code
+  1, WITH a reset ETA, but as an absolute date/time rather than a compact duration.
+  **Critically, this arrives as a `type: "error"`/`"turn.failed"` event inside the `--json` event
+  stream on STDOUT, not on stderr** — the same failed job's stderr contained only the benign,
+  always-present `"Reading additional input from stdin..."` line. `dispatcher.py` previously only
+  ever scanned `stderr_log_path`, so no stderr-only regex — however correct — could have caught
+  this; `parse_error` (all four providers) now accepts an optional `stdout_tail` and the dispatcher
+  passes it, with codex.py actually depending on it. `providers/codex.py`'s `parse_error` matches
+  the confirmed phrase via `_QUOTA_PATTERN_HIT_LIMIT` and opportunistically parses the absolute
+  date via `_ABSOLUTE_RESET_PATTERN`; the original best-effort guessed regex is kept as a fallback.
 
 ## Validated `cursor` CLI behavior
 
@@ -712,9 +719,14 @@ Confirmed empirically against the installed CLI (`cursor-agent`, Windows, free-t
   syntax (`f"{model}[effort={effort}]"`) only when both are set. **UNCONFIRMED against a real
   call** — this account is free-tier and can only use `auto`, which the bracket syntax was never
   validated against.
-- **No structured quota-exhaustion signal was found** — this account never hit a real rate limit
-  during validation. `providers/cursor.py`'s `parse_error` is best-effort only, same unconfirmed
-  posture as `codex`'s.
+- **Confirmed quota-exhaustion signal as of 2026-07-27** (real free-tier account, discovered
+  during live multi-provider stress-testing): the exhaustion message is `"ActionRequiredError:
+  You've hit your usage limit Get Cursor Pro for more Agent usage, unlimited Tab, and more."`,
+  exit code 1, with **no reset-time/ETA in the message**. `providers/cursor.py`'s `parse_error`
+  matches this via `_QUOTA_NO_RESET_PATTERN` and returns `("quota_exhausted", None)`. An
+  original unconfirmed pattern (`_QUOTA_PATTERN_WITH_RESET`) is kept as a fallback in case other
+  plan tiers emit different wording. Fixed in commit `667b1f8`; verified end-to-end through the
+  real `delegate_task` dispatcher path on 2026-07-27.
 
 ## Validated `copilot` CLI behavior
 
@@ -795,11 +807,14 @@ on 2026-07-26 — real invocations against a scratch directory, not vendor docs 
   `Error: Model "<name>" from --model flag is not available.`; only `"auto"` was confirmed working.
   This is an account/plan limitation, not a CADET bug — `CADET_COPILOT_MODEL`/`model` still passes
   whatever string is given straight through.
-- **No structured quota-exhaustion signal was found** — this account never hit a real rate limit
-  during validation. `providers/copilot.py`'s `parse_error` is best-effort only, same unconfirmed
-  posture as `codex`'s/`cursor`'s. Two real non-quota error strings were captured above (the
-  model/effort mismatch and the model-not-available error) and are covered by `parse_error`'s tests
-  as confirmed non-matches.
+- **Confirmed quota-exhaustion wording as of 2026-07-27** (real free-tier account, hit twice during
+  live multi-provider stress-testing): `"You have exceeded your monthly quota (Request ID:
+  <id>)."` — exit code 1, delivered on stderr (this provider always uses `--output-format text`,
+  not a JSON event stream like codex, so the existing stderr scan already reaches it), no
+  reset-time/ETA anywhere in the message. `providers/copilot.py`'s `parse_error` matches this via
+  `_QUOTA_NO_RESET_PATTERN`; the original best-effort guessed regex is kept as a fallback. Two real
+  non-quota error strings were captured above (the model/effort mismatch and the model-not-available
+  error) and remain covered by `parse_error`'s tests as confirmed non-matches.
 
 ## Quota exhaustion detection
 
@@ -807,7 +822,11 @@ Because the failure text above is a real, current, machine-parseable format (not
 does best-effort detection rather than treating every failure as opaque:
 
 - After any job whose process exits non-zero, before finalizing the row, `run_job` scans the
-  tail of `stderr.log` for a pattern like `quota reached.*resets in ([0-9dhms]+)` (case-insensitive).
+  tail of **both** `stderr.log` and `stdout.log` for a pattern like `quota reached.*resets in
+  ([0-9dhms]+)` (case-insensitive) — each provider's own `parse_error` has its own confirmed
+  pattern(s). Scanning stdout too was added 2026-07-27 after discovering codex's `--json` mode
+  delivers its real quota error as a stdout event, not to stderr at all; for the other three
+  providers, stdout is scanned defensively but their confirmed messages arrive via stderr.
 - On a match: parse the duration (`94h31m53s` → seconds) and set `error_kind = "quota_exhausted"`
   and `quota_reset_at = finished_at + parsed_duration` (ISO8601) on the row, alongside the usual
   `failed` status and `exit_code`. `quota_exhausted` is a **label on a `failed` job**, not a new
@@ -864,14 +883,14 @@ than CADET building a new notification channel of its own.
    under one `context_id` instead of relying solely on `agy` cold-reading SALTMDB each time. Not
    adopted in v1 because it's unverified whether `-p` (print) mode exposes the new conversation's
    ID anywhere capturable by CADET after a run. Worth revisiting once that's confirmed.
-7. **Quota-exhaustion wording is only empirically confirmed for `agy`.** `codex`'s, `cursor`'s, and
-   `copilot`'s `parse_error` are all best-effort guesses at vendor wording, never validated against
-   a real exhausted-quota failure — forcing one deliberately to test it wasn't attempted, since it
-   burns real quota. Until each provider has its own confirmed reproduction (the next time one is
-   naturally exhausted during real usage — capture the exact stderr then), a `null` `error_kind` on
-   a failed non-agy job does **not** mean "definitely not a quota issue" — it may just mean the
-   guessed regex didn't match. Check raw `stderr` via `get_task_output` rather than trusting
-   `error_kind` alone for non-agy providers in the meantime.
+7. **Quota-exhaustion wording is now empirically confirmed for all four providers** (as of
+   2026-07-27, `agy` was already confirmed; `cursor`, `codex`, and `copilot` were each deliberately
+   exhausted during a live multi-provider stress-testing session — see each provider's own
+   "Validated CLI behavior" section above and `parse_error`'s docstring/tests). A `null` `error_kind`
+   on a failed job now genuinely means the confirmed pattern(s) didn't match — still worth checking
+   raw `stderr`/`stdout` via `get_task_output` if a failure looks quota-shaped but wasn't classified,
+   since a vendor could change wording in a future CLI version and silently stop matching, same
+   caveat that already applied to `agy`.
 8. **`cursor`'s "safe-but-functional" edit mode is unreachable headlessly.** Unlike `codex` (whose
    broken middle ground is a Windows-specific upstream bug that could plausibly be fixed
    upstream), `cursor`'s gap looks structural: real edits require bypassing tool-call approval

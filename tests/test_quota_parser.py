@@ -44,6 +44,16 @@ class TestParseQuotaExhaustion(unittest.TestCase):
         stderr = "quota reached, resets in 3h2d"
         self.assertEqual(parse_quota_exhaustion(stderr, "2026-07-26T00:00:00"), (None, None))
 
+    def test_stdout_tail_is_also_scanned(self):
+        # Defensive: agy's confirmed message arrives via stderr, but the
+        # parser should not ignore stdout if it ever showed up there instead
+        # (see codex.py, where this is load-bearing rather than defensive).
+        error_kind, quota_reset_at = parse_quota_exhaustion(
+            "", "2026-07-26T00:00:00", stdout_tail=REAL_QUOTA_STDERR
+        )
+        self.assertEqual(error_kind, "quota_exhausted")
+        self.assertEqual(quota_reset_at, "2026-07-29T22:31:53")
+
 
 if __name__ == "__main__":
     unittest.main()

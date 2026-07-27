@@ -117,12 +117,19 @@ real installed binary (`@github/copilot` npm package v1.0.75, Windows):
 - stdin is still explicitly redirected to DEVNULL as a defensive measure,
   same as every other provider (this process is a long-running MCP server's
   subprocess; never let a child inherit its stdio transport pipe).
-- No structured quota-exhaustion signal was found in vendor docs or during
-  validation (this account never hit a real rate limit) — parse_error is
-  best-effort only, same posture as codex's/cursor's unconfirmed regex. Two
-  real non-quota error strings were captured during validation (the
-  model/effort mismatch and the model-not-available error) and are covered
-  by parse_error's tests as confirmed non-matches.
+- **Confirmed 2026-07-27** (real free-tier account, hit twice during live
+  multi-provider stress-testing via real `delegate_task` calls): the real
+  quota-exhaustion message is `"You have exceeded your monthly quota (Request
+  ID: <id>)."`, exit code 1, delivered on **stderr** (this provider always
+  uses `--output-format text`, not a JSON event stream, unlike codex — so
+  the existing stderr-only scan already reaches it), **no reset-time/ETA
+  anywhere in the message**. `parse_error` matches this via
+  `_QUOTA_NO_RESET_PATTERN` and returns `("quota_exhausted", None)`. The
+  original guessed pattern (`_QUOTA_PATTERN`) is kept as a fallback in case a
+  different plan tier emits reset-ETA wording. Two real non-quota error
+  strings were also captured during earlier validation (the model/effort
+  mismatch and the model-not-available error) and remain covered by
+  parse_error's tests as confirmed non-matches.
 
 Containerized 2026-07-27 (Phase 5, mirroring codex's Phase 3 / cursor's
 Phase 4 pattern — see docs/ARCHITECTURE.md's "Containerized copilot
@@ -198,10 +205,17 @@ NAME = "copilot"
 AGENT_ID = "copilot"
 DISPLAY_NAME = "GitHub Copilot CLI"
 
-# Best-effort only: not empirically confirmed (never observed a real quota
-# exhaustion during validation, and forcing one would burn the pool). Not
-# finding a match is not an error, same as agy/codex/cursor's quota parsers.
+# _QUOTA_PATTERN is the original best-effort guess (never observed during
+# initial validation) -- kept as a fallback shape in case some plan tier
+# emits it instead. _QUOTA_NO_RESET_PATTERN is the real, empirically
+# confirmed message (2026-07-27, real free-tier account, live job failure
+# via delegate_task): "You have exceeded your monthly quota (Request ID:
+# ...)." -- exit code 1, delivered on stderr, no reset-time/ETA anywhere in
+# the message, so quota_reset_at legitimately stays None for this shape.
+# Same "provider-specific, never shared" reasoning as cursor's fix in commit
+# 667b1f8 -- do NOT unify this with agy/codex/cursor's own patterns.
 _QUOTA_PATTERN = re.compile(r"usage limit reached.*?(?:try again|resets?) (?:in |at )?([0-9dhms]+)", re.IGNORECASE | re.DOTALL)
+_QUOTA_NO_RESET_PATTERN = re.compile(r"exceeded your monthly quota", re.IGNORECASE)
 _DURATION_PATTERN = re.compile(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
 
 
@@ -373,12 +387,19 @@ def _parse_duration_to_seconds(duration_str: str):
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
-def parse_error(stderr_tail: str, finished_at_iso: str):
-    """Best-effort scan of a failed job's stderr tail for a quota-exhaustion
-    message. UNCONFIRMED — no real copilot rate-limit wording was observed
-    during validation. Returns (None, None) on no match, which is the
-    expected/common case, not an error."""
-    match = _QUOTA_PATTERN.search(stderr_tail or "")
+def parse_error(stderr_tail: str, finished_at_iso: str, stdout_tail: str = ""):
+    """Scan a failed job's stderr (and, defensively, stdout) tail for a
+    quota-exhaustion message. Returns (None, None) on no match, which is the
+    expected/common case, not an error. Checks the confirmed real message
+    first (no reset ETA in it, so quota_reset_at stays None), then falls
+    back to the original unconfirmed guessed shape (which does carry a
+    duration) in case some plan tier emits that instead — see the module
+    docstring and the two pattern constants above for why these are
+    copilot-specific, not shared with other providers."""
+    combined = f"{stderr_tail or ''}\n{stdout_tail or ''}"
+    if _QUOTA_NO_RESET_PATTERN.search(combined):
+        return "quota_exhausted", None
+    match = _QUOTA_PATTERN.search(combined)
     if not match:
         return None, None
     seconds = _parse_duration_to_seconds(match.group(1))

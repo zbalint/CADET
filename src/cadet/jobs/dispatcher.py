@@ -148,7 +148,8 @@ class Dispatcher:
                     "cursor": parse_error_cursor, "copilot": parse_error_copilot,
                 }
                 error_kind, quota_reset_at = parse_error_fns[provider_name](
-                    _read_tail(job["stderr_log_path"]), finished_at
+                    _read_tail(job["stderr_log_path"]), finished_at,
+                    stdout_tail=_read_tail(job["stdout_log_path"]),
                 )
                 error_message = f"{provider_name} exited {exit_code}"
 

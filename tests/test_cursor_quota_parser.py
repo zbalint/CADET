@@ -47,6 +47,15 @@ class TestParseError(unittest.TestCase):
         )
         self.assertEqual(parse_error(stderr, "2026-07-26T00:00:00"), (None, None))
 
+    def test_stdout_tail_is_also_scanned(self):
+        # Defensive: cursor's confirmed message arrives via stderr, but the
+        # parser should not ignore stdout if it ever showed up there instead.
+        error_kind, quota_reset_at = parse_error(
+            "", "2026-07-26T00:00:00", stdout_tail=REAL_QUOTA_STDERR
+        )
+        self.assertEqual(error_kind, "quota_exhausted")
+        self.assertIsNone(quota_reset_at)
+
     def test_sandbox_unavailable_error_does_not_falsely_match_as_quota(self):
         # Real stderr text captured during empirical validation (see cursor.py) —
         # --sandbox enabled hard-errors on Windows.

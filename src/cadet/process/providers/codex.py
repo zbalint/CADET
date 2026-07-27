@@ -40,6 +40,21 @@ docs/ARCHITECTURE.md's "Containerized codex execution" section):
   `--dangerously-bypass-approvals-and-sandbox` and enforces the read-only/read-write distinction via
   the `/workspace` bind mount itself (`:ro` vs default `:rw`) instead — kernel VFS enforcement, not
   subject to the same restriction.
+- **Confirmed 2026-07-27** (real free-tier/plan account, hit during live multi-provider
+  stress-testing): the real quota-exhaustion message is `"You've hit your usage limit. Upgrade to
+  Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at Aug 25th, 2026
+  4:25 PM."` — exit code 1, WITH a reset ETA, but as an **absolute date/time**, not a compact
+  duration like `5h30m`. **Critically, this error arrives as a `type: "error"`/`"turn.failed"`
+  event inside the `--json` event stream on STDOUT, not on stderr** — stderr for this same failed
+  job contained only the benign, always-present `"Reading additional input from stdin..."` line.
+  This means no stderr-only regex, however correct, could ever have caught it; `parse_error` now
+  accepts an optional `stdout_tail` and scans both. `_QUOTA_PATTERN_HIT_LIMIT` matches the phrase
+  and `_ABSOLUTE_RESET_PATTERN` opportunistically extracts the date/time (parsed via
+  `datetime.strptime`, ordinal suffix stripped by the regex itself); if the date portion doesn't
+  parse for some reason, `quota_exhausted` is still returned with `quota_reset_at=None` rather than
+  silently missing the classification entirely. The original guessed pattern
+  (`_QUOTA_PATTERN`, `"usage limit reached...try again in <duration>"`) is kept as a fallback for a
+  hypothetical different message shape, same reasoning as cursor's fix in commit `667b1f8`.
 """
 import asyncio
 import re
@@ -50,10 +65,20 @@ NAME = "codex"
 AGENT_ID = "codex"
 DISPLAY_NAME = "Codex CLI"
 
-# Best-effort only: not empirically confirmed (never observed a real quota
-# exhaustion during validation, and forcing one would burn the pool). Not
-# finding a match is not an error, same as agy's parse_quota_exhaustion.
+# _QUOTA_PATTERN is the original best-effort guess (never observed during
+# initial validation) -- kept as a fallback shape in case some plan tier
+# emits a compact duration instead. _QUOTA_PATTERN_HIT_LIMIT/
+# _ABSOLUTE_RESET_PATTERN are the real, empirically confirmed shape
+# (2026-07-27): "You've hit your usage limit ... or try again at Aug 25th,
+# 2026 4:25 PM." -- an absolute date/time, not a compact duration, and
+# delivered on stdout (codex's --json event stream), not stderr -- see the
+# module docstring.
 _QUOTA_PATTERN = re.compile(r"usage limit reached.*?(?:try again|resets?) (?:in |at )?([0-9dhms]+)", re.IGNORECASE | re.DOTALL)
+_QUOTA_PATTERN_HIT_LIMIT = re.compile(r"hit your usage limit", re.IGNORECASE)
+_ABSOLUTE_RESET_PATTERN = re.compile(
+    r"try again at ([A-Za-z]{3,9})\.? (\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*([AP]M)",
+    re.IGNORECASE,
+)
 _DURATION_PATTERN = re.compile(r"(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?")
 
 
@@ -170,13 +195,36 @@ def _parse_duration_to_seconds(duration_str: str):
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
-def parse_error(stderr_tail: str, finished_at_iso: str):
-    """Best-effort scan of a failed job's stderr tail for a quota-exhaustion
-    message. Unlike agy's regex (empirically confirmed against real vendor
-    text), this pattern is UNCONFIRMED — codex's exact rate-limit wording
-    wasn't observed during validation. Returns (None, None) on no match,
-    which is the expected/common case, not an error."""
-    match = _QUOTA_PATTERN.search(stderr_tail or "")
+def _parse_absolute_reset(month: str, day: str, year: str, hour: str, minute: str, meridiem: str):
+    text = f"{month} {day} {year} {hour}:{minute} {meridiem.upper()}"
+    for fmt in ("%b %d %Y %I:%M %p", "%B %d %Y %I:%M %p"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def parse_error(stderr_tail: str, finished_at_iso: str, stdout_tail: str = ""):
+    """Scan a failed job's stderr AND stdout tails for a quota-exhaustion
+    message. Returns (None, None) on no match, which is the expected/common
+    case, not an error. `stdout_tail` is required here (unlike the other
+    providers, where it's defensive) because codex's real quota error is
+    delivered via its `--json` event stream on stdout, not stderr — see the
+    module docstring. Checks the confirmed real "hit your usage limit"
+    phrasing first (opportunistically extracting an absolute-date reset ETA
+    if present and parseable), then falls back to the original unconfirmed
+    guessed shape (which expects a compact duration) in case some other plan
+    tier emits that instead."""
+    combined = f"{stderr_tail or ''}\n{stdout_tail or ''}"
+    if _QUOTA_PATTERN_HIT_LIMIT.search(combined):
+        match = _ABSOLUTE_RESET_PATTERN.search(combined)
+        if match:
+            reset_dt = _parse_absolute_reset(*match.groups())
+            if reset_dt is not None:
+                return "quota_exhausted", reset_dt.isoformat()
+        return "quota_exhausted", None
+    match = _QUOTA_PATTERN.search(combined)
     if not match:
         return None, None
     seconds = _parse_duration_to_seconds(match.group(1))

@@ -307,18 +307,22 @@ def _parse_duration_to_seconds(duration_str: str):
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
-def parse_error(stderr_tail: str, finished_at_iso: str):
-    """Scan a failed job's stderr tail for a quota-exhaustion message.
-    Returns (None, None) on no match, which is the expected/common case, not
-    an error. Checks the confirmed real message first (no reset ETA in it,
-    so quota_reset_at stays None), then falls back to the original unconfirmed
-    guessed shape (which does carry a duration) in case some plan tier emits
-    that instead — see the module docstring and the two pattern constants
-    above for why these are cursor-specific, not shared with other providers."""
-    stderr_tail = stderr_tail or ""
-    if _QUOTA_NO_RESET_PATTERN.search(stderr_tail):
+def parse_error(stderr_tail: str, finished_at_iso: str, stdout_tail: str = ""):
+    """Scan a failed job's stderr (and, defensively, stdout) tail for a
+    quota-exhaustion message. Returns (None, None) on no match, which is the
+    expected/common case, not an error. Checks the confirmed real message
+    first (no reset ETA in it, so quota_reset_at stays None), then falls
+    back to the original unconfirmed guessed shape (which does carry a
+    duration) in case some plan tier emits that instead — see the module
+    docstring and the two pattern constants above for why these are
+    cursor-specific, not shared with other providers. `stdout_tail` is
+    scanned defensively only — cursor's confirmed real message arrives via
+    stderr (`--output-format text`, not a JSON event stream); codex is the
+    provider where scanning stdout is actually load-bearing, see codex.py."""
+    combined = f"{stderr_tail or ''}\n{stdout_tail or ''}"
+    if _QUOTA_NO_RESET_PATTERN.search(combined):
         return "quota_exhausted", None
-    match = _QUOTA_PATTERN_WITH_RESET.search(stderr_tail)
+    match = _QUOTA_PATTERN_WITH_RESET.search(combined)
     if not match:
         return None, None
     seconds = _parse_duration_to_seconds(match.group(1))
