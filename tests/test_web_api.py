@@ -82,6 +82,21 @@ class TestListTasks(WebApiTestCase):
         resp = self.client.get("/api/tasks", params={"status_filter": "succeeded"})
         self.assertEqual([t["job_id"] for t in resp.json()], ["job-2"])
 
+    def test_provider_filter(self):
+        self._insert("job-1", provider="agy")
+        self._insert("job-2", provider="cursor")
+
+        resp = self.client.get("/api/tasks", params={"provider_filter": "cursor"})
+        self.assertEqual([t["job_id"] for t in resp.json()], ["job-2"])
+
+    def test_shaped_jobs_include_provider_effort_and_sandbox(self):
+        self._insert("job-1", provider="codex", effort="high", skip_permissions=True)
+        resp = self.client.get("/api/tasks")
+        body = resp.json()[0]
+        self.assertEqual(body["provider"], "codex")
+        self.assertEqual(body["effort"], "high")
+        self.assertIs(body["skip_permissions"], True)
+
     def test_limit_clamped(self):
         self._insert("job-1")
         resp = self.client.get("/api/tasks", params={"limit": 99999})
@@ -159,6 +174,20 @@ class TestCancelTask(WebApiTestCase):
         body = resp.json()
         self.assertTrue(body["already_terminal"])
         self.assertEqual(body["status"], "succeeded")
+
+
+class TestListProviders(WebApiTestCase):
+    def test_returns_all_registered_providers(self):
+        resp = self.client.get("/api/providers")
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        names = {p["name"] for p in body}
+        self.assertEqual(names, {"agy", "codex", "cursor", "copilot"})
+        by_name = {p["name"]: p["display_name"] for p in body}
+        self.assertEqual(by_name["agy"], "Antigravity (agy)")
+        self.assertEqual(by_name["codex"], "Codex CLI")
+        self.assertEqual(by_name["cursor"], "Cursor CLI")
+        self.assertEqual(by_name["copilot"], "GitHub Copilot CLI")
 
 
 class TestStaticFrontend(WebApiTestCase):

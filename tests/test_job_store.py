@@ -197,6 +197,14 @@ class TestListJobs(JobStoreTestCase):
         by_context = job_store.list_jobs(context_id="ctx-a", db_connection=self.conn)
         self.assertEqual([j["job_id"] for j in by_context], ["job-2", "job-1"])
 
+    def test_provider_filter(self):
+        self._insert(job_id="job-1", provider="agy", created_at="2026-07-26T00:00:01")
+        self._insert(job_id="job-2", provider="cursor", created_at="2026-07-26T00:00:02")
+        self._insert(job_id="job-3", provider="cursor", created_at="2026-07-26T00:00:03")
+
+        by_provider = job_store.list_jobs(provider_filter="cursor", db_connection=self.conn)
+        self.assertEqual([j["job_id"] for j in by_provider], ["job-3", "job-2"])
+
     def test_limit_applies(self):
         for i in range(5):
             self._insert(job_id=f"job-{i}", created_at=f"2026-07-26T00:00:0{i}")

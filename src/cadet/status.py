@@ -32,6 +32,8 @@ def shape_status_dict(job: dict, db_path: str | None = None) -> dict:
         "status": status,
         "provider": job["provider"],
         "model": job["model"],
+        "effort": job["effort"],
+        "skip_permissions": bool(job["skip_permissions"]),
         "created_at": job["created_at"],
         "started_at": job["started_at"],
         "elapsed_s": elapsed_s,

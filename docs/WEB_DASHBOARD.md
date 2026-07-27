@@ -41,10 +41,11 @@ There is no authentication anywhere in CADET. Since the dashboard exposes job pr
 |---|---|---|
 | `/` | GET | Serves the static dashboard (`src/cadet/web/static/index.html`). |
 | `/api/health` | GET | Liveness check. |
-| `/api/tasks` | GET | `status_filter`, `context_id`, `limit` query params — same shape as the `list_tasks` MCP tool. |
+| `/api/tasks` | GET | `status_filter`, `context_id`, `provider_filter`, `limit` query params — same shape as the `list_tasks` MCP tool. |
 | `/api/tasks/{job_id}` | GET | Same shape as `check_task_status`. 404 if unknown. |
 | `/api/tasks/{job_id}/output` | GET | `tail_lines` query param — same shape as `get_task_output`. 404 if unknown. |
 | `/api/tasks/{job_id}/cancel` | POST | Same shape as `cancel_task`. Idempotent on terminal jobs. 404 if unknown. |
+| `/api/providers` | GET | `[{"name": ..., "display_name": ...}, ...]` for every registered provider (`cadet.process.providers.registry`) — lets the frontend label/filter jobs by provider without hardcoding the list. |
 
 Response shaping is shared with the MCP tools via `src/cadet/status.py` (`shape_status_dict`,
 `pending_queue_position`, `read_log`) — one source of truth for what a "task status" looks like.
@@ -54,3 +55,9 @@ Response shaping is shared with the MCP tools via `src/cadet/status.py` (`shape_
 Plain HTML/CSS/JS (`src/cadet/web/static/`) — no build step, no framework. The page polls
 `/api/tasks` on an interval to refresh the list, and polls `/api/tasks/{id}` +
 `/api/tasks/{id}/output` on a separate interval only while a task's detail pane is open.
+
+Each job's `provider` is shown as a colored badge next to its status badge in the list, and as a row
+(alongside `effort` and sandbox mode) in the detail pane's metadata grid. The provider filter
+dropdown is populated at load time from `/api/providers` rather than a hardcoded list, so it always
+reflects whatever's registered in `cadet.process.providers.registry` — currently `agy`, `codex`,
+`cursor`, `copilot`.

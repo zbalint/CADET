@@ -181,14 +181,21 @@ def get_task_output(job_id: str = None, tail_lines: int = None, **kwargs) -> dic
 
 
 @mcp.tool()
-def list_tasks(status_filter: str = None, context_id: str = None, limit: int = None, **kwargs) -> list:
+def list_tasks(
+    status_filter: str = None, context_id: str = None, provider_filter: str = None,
+    limit: int = None, **kwargs,
+) -> list:
     kw = _unwrap_kwargs(kwargs)
     status_filter_ = _resolve(status_filter, kw, kwargs, "status_filter", "status")
     context_id_ = _resolve(context_id, kw, kwargs, "context_id", "project_id", "project")
+    provider_filter_ = _resolve(provider_filter, kw, kwargs, "provider_filter", "provider")
     limit_ = _resolve(limit, kw, kwargs, "limit") or 20
     limit_ = max(1, min(int(limit_), 200))
 
-    jobs = job_store.list_jobs(status_filter=status_filter_, context_id=context_id_, limit=limit_)
+    jobs = job_store.list_jobs(
+        status_filter=status_filter_, context_id=context_id_, provider_filter=provider_filter_,
+        limit=limit_,
+    )
     return [status.shape_status_dict(job) for job in jobs]
 
 

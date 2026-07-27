@@ -112,7 +112,7 @@ def mark_unknown_interrupted(job_id, error_message, finished_at, db_connection=N
             return cur.rowcount == 1
 
 
-def list_jobs(status_filter=None, context_id=None, limit=20, db_connection=None, db_path=None):
+def list_jobs(status_filter=None, context_id=None, provider_filter=None, limit=20, db_connection=None, db_path=None):
     query = "SELECT * FROM jobs WHERE 1=1"
     params = []
     if status_filter:
@@ -121,6 +121,9 @@ def list_jobs(status_filter=None, context_id=None, limit=20, db_connection=None,
     if context_id:
         query += " AND context_id = ?"
         params.append(context_id)
+    if provider_filter:
+        query += " AND provider = ?"
+        params.append(provider_filter)
     query += " ORDER BY created_at DESC LIMIT ?"
     params.append(limit)
     with managed_connection(db_connection, db_path) as conn:

@@ -6,6 +6,7 @@ from fastapi.staticfiles import StaticFiles
 
 from cadet import status as status_shaping
 from cadet.db import job_store
+from cadet.process.providers import registry
 
 STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 
@@ -25,12 +26,23 @@ def create_app(dispatcher, db_path: str) -> FastAPI:
         return {"status": "ok"}
 
     @app.get("/api/tasks")
-    def list_tasks(status_filter: str | None = None, context_id: str | None = None, limit: int = 20):
+    def list_tasks(
+        status_filter: str | None = None, context_id: str | None = None,
+        provider_filter: str | None = None, limit: int = 20,
+    ):
         limit = max(1, min(int(limit), 200))
         jobs = job_store.list_jobs(
-            status_filter=status_filter, context_id=context_id, limit=limit, db_path=app.state.db_path
+            status_filter=status_filter, context_id=context_id, provider_filter=provider_filter,
+            limit=limit, db_path=app.state.db_path,
         )
         return [status_shaping.shape_status_dict(job, db_path=app.state.db_path) for job in jobs]
+
+    @app.get("/api/providers")
+    def list_providers():
+        return [
+            {"name": name, "display_name": registry.get(name).DISPLAY_NAME}
+            for name in registry.names()
+        ]
 
     @app.get("/api/tasks/{job_id}")
     def get_task(job_id: str):

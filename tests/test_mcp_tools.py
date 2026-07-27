@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from cadet import config
+from cadet.db import job_store
 from cadet.db.schema import init_db
 from cadet.jobs.dispatcher import Dispatcher
 from cadet.mcp import tools
@@ -187,6 +188,21 @@ class TestListTasks(McpToolsTestCase):
     async def test_limit_hard_capped_at_200(self):
         result = tools.list_tasks(limit=99999)
         self.assertIsInstance(result, list)  # would raise if limit weren't clamped safely
+
+    async def test_provider_filter_and_alias(self):
+        await tools.delegate_task(prompt="x", cwd=self.scratch_cwd, context_id="ctx-agy")
+        job_store.insert_job(
+            job_id="job-cursor", context_id="ctx-cursor", label="l", prompt_path="p.txt",
+            cwd=self.scratch_cwd, model=None, effort=None, skip_permissions=False,
+            provider="cursor", status="pending", created_at="2026-07-26T00:00:00", timeout_s=30,
+            stdout_log_path="out.log", stderr_log_path="err.log", db_path=self.db_path,
+        )
+
+        by_provider_filter = tools.list_tasks(provider_filter="cursor")
+        self.assertEqual([t["job_id"] for t in by_provider_filter], ["job-cursor"])
+
+        by_alias = tools.list_tasks(provider="cursor")
+        self.assertEqual([t["job_id"] for t in by_alias], ["job-cursor"])
 
 
 class TestCancelTask(McpToolsTestCase):

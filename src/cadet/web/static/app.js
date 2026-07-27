@@ -15,6 +15,7 @@
     selectedId: null,
     activeLog: "stdout",
     lastOutput: null,
+    providerNames: {},
   };
 
   const el = (id) => document.getElementById(id);
@@ -41,6 +42,34 @@
     return span;
   }
 
+  function providerLabel(name) {
+    if (!name) return "—";
+    return state.providerNames[name] || name;
+  }
+
+  function providerBadge(name) {
+    const span = document.createElement("span");
+    span.className = `provider-badge provider-${name}`;
+    span.textContent = providerLabel(name);
+    return span;
+  }
+
+  // --- providers ---
+
+  async function loadProviders() {
+    const { ok, body } = await fetchJson("/api/providers");
+    if (!ok || !Array.isArray(body)) return;
+    const select = el("filter-provider");
+    for (const { name, display_name } of body) {
+      state.providerNames[name] = display_name;
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = display_name;
+      select.appendChild(option);
+    }
+    renderTaskList(); // re-render any already-fetched rows with real display names
+  }
+
   // --- health ---
 
   async function pollHealth() {
@@ -61,8 +90,10 @@
   function buildListQuery() {
     const params = new URLSearchParams();
     const status = el("filter-status").value;
+    const provider = el("filter-provider").value;
     const contextId = el("filter-context").value.trim();
     if (status) params.set("status_filter", status);
+    if (provider) params.set("provider_filter", provider);
     if (contextId) params.set("context_id", contextId);
     params.set("limit", "200");
     return params.toString();
@@ -101,7 +132,11 @@
       label.className = "task-row-label";
       label.textContent = task.label || task.job_id;
       top.appendChild(label);
-      top.appendChild(statusBadge(task.status));
+      const badges = document.createElement("span");
+      badges.className = "task-row-badges";
+      badges.appendChild(providerBadge(task.provider));
+      badges.appendChild(statusBadge(task.status));
+      top.appendChild(badges);
       li.appendChild(top);
 
       const meta = document.createElement("div");
@@ -171,7 +206,10 @@
     meta.innerHTML = "";
     const rows = [
       ["context_id", task.context_id],
+      ["provider", providerLabel(task.provider)],
       ["model", task.model || "(default)"],
+      ["effort", task.effort || "(default)"],
+      ["sandbox", task.skip_permissions ? "off — unsandboxed, real edits" : "on — read-only enforced"],
       ["created_at", task.created_at],
       ["started_at", task.started_at || "—"],
       ["elapsed", fmtElapsed(task.elapsed_s)],
@@ -224,6 +262,7 @@
   el("tail-toggle").addEventListener("change", refreshDetail);
   el("refresh-btn").addEventListener("click", () => { pollTasks(); refreshDetail(); });
   el("filter-status").addEventListener("change", pollTasks);
+  el("filter-provider").addEventListener("change", pollTasks);
   let filterDebounce;
   el("filter-context").addEventListener("input", () => {
     clearTimeout(filterDebounce);
@@ -231,6 +270,7 @@
   });
 
   pollHealth();
+  loadProviders();
   pollTasks();
   setInterval(pollHealth, HEALTH_POLL_MS);
   setInterval(pollTasks, LIST_POLL_MS);
