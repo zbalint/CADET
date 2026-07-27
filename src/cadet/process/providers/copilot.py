@@ -138,31 +138,47 @@ cursor:
   node.exe/npm-loader.js indirection is needed the way the native Windows
   npm-global-install layout requires (see `_resolve_windows_invocation`
   above) — `build_argv(container=True)` skips straight to `[copilot_path]`.
-- **Auth: UNCONFIRMED, not yet live-tested end-to-end** (unlike agy/codex/
-  cursor, whose Phase 2/3/4 rollouts each empirically validated a real login
-  or credential copy against the real container before being wired up here).
-  Two mechanisms are implemented, mirroring cursor's "auth volume primary,
-  token optional override" shape — see `build_docker_argv`'s docstring for
-  the full reasoning:
-  1. A `cadet-copilot-auth` Docker volume mounted at `/root/.copilot` (the
-     CLI's own default `COPILOT_HOME`), intended to be populated by a
-     one-time `copilot login` device-flow via `copilot_docker_setup.py`
-     (mirrors `cursor_docker_setup.py`'s `login()`/`check_volume()` shape).
-     `copilot login --help` documents that the token is normally stored in
-     the OS credential store, falling back to a plain-text file under
-     `~/.copilot/` only "if a credential store is not found" — expected
-     (not yet confirmed) to be the case in this minimal container.
+- **Auth: CONFIRMED live 2026-07-27, via `docker run -it` (a real allocated
+  pseudo-TTY), NOT the plain `copilot_docker_setup.py login()` subprocess
+  path (`docker run` without `-it`).** Two attempts through
+  `copilot_docker_setup.py`'s non-interactive `subprocess.run(["docker",
+  "run", "--rm", ...])` (no `-it`) both completed the OAuth device-flow
+  successfully but then printed "Login succeeded, but the token was not
+  saved. Install a system keychain or rerun login and accept plaintext
+  storage." and exited 1 — this minimal container has no system keychain
+  (no D-Bus/libsecret/gnome-keyring), and the plain-text fallback
+  `copilot login --help` documents does NOT auto-trigger without a real
+  TTY; piping answers via stdin (`docker run -i` without `-t`) made no
+  difference either. The fix, confirmed working: run `docker run --rm -it
+  -v cadet-copilot-auth:/root/.copilot cadet-copilot:latest copilot login`
+  directly in a real interactive terminal (this cannot be done through an
+  automation harness with no PTY — the user ran it themselves, mirroring
+  agy's Phase 2 interactive-login requirement exactly), accept the
+  plaintext-storage prompt when asked, and the resulting
+  `/root/.copilot/config.json` (holding the real token, not just the
+  non-secret `loggedInUsers` metadata the Windows host's copy has) persists
+  in the volume. Verified via a real subsequent authenticated call (`docker
+  run --rm -v cadet-copilot-auth:/root/.copilot cadet-copilot:latest
+  copilot -p "What is 2+2?" --allow-all-tools --model auto ...` →
+  "2+2 equals 4.", zero further login needed). **`copilot_docker_setup.py`'s
+  own `login()` should be treated as non-functional as currently written**
+  (no `-it`) — either fix it to allocate a real TTY (unclear how to do that
+  from a non-interactive Python `subprocess.run` at all) or keep documenting
+  the manual `docker run -it` command as the real setup step.
+  1. The `cadet-copilot-auth` Docker volume mounted at `/root/.copilot` (the
+     CLI's own default `COPILOT_HOME`) is the primary mechanism, populated
+     as described above.
   2. `COPILOT_GITHUB_TOKEN` (`config.get_copilot_github_token()`,
      `CADET_COPILOT_GITHUB_TOKEN` env var), forwarded via `-e` when set —
      confirmed by `copilot help environment`/`copilot login --help` (real
-     vendor docs) to take precedence over any stored credential. A
-     fine-grained PAT with the "Copilot Requests" permission or a `gh` CLI
-     OAuth token both work per the same docs; classic PATs (`ghp_`) are
-     explicitly not supported. This is the more likely-to-work-first path,
-     since it needs no interactive device-flow step inside the container.
-  **Whoever runs the first live smoke test against this image should update
-  this docstring with the actual confirmed result**, same as every prior
-  phase's rollout note.
+     vendor docs, not yet exercised end-to-end with a real token) to take
+     precedence over any stored credential. A fine-grained PAT with the
+     "Copilot Requests" permission (note: only appears in GitHub's UI when
+     the token's Resource owner is your personal account, not an
+     organization — a real gotcha hit while investigating this) or a `gh`
+     CLI OAuth token both work per the same docs; classic PATs (`ghp_`) are
+     explicitly not supported. Needs no interactive device-flow step at all
+     if you have a token handy, unlike mechanism 1 above.
 - The `--mode plan --deny-tool shell` / `--allow-all-tools` argv-level
   semantics validated above (on native Windows) are assumed, NOT yet
   confirmed, to hold identically inside the Linux container — no live

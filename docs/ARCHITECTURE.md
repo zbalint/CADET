@@ -254,11 +254,18 @@ Phase 5: the same containerization decision made for `agy`/`codex`/`cursor` (see
 workaround, see "Validated `copilot` CLI behavior" below) entirely — no dual mode. **All four
 providers are now containerized; none remain on native host-binary execution.**
 
-**Unlike agy/codex/cursor's Phase 2/3/4 rollouts, this phase's auth story is UNCONFIRMED — no live
-container run has exercised it yet.** Code, config plumbing, and tests are in place, mirroring the
-established pattern exactly, but whoever runs the first live smoke test should update this section
-(and `providers/copilot.py`'s module docstring) with the actual confirmed result, same as every
-prior phase's rollout note once it went from "wired up" to "verified."
+**Auth CONFIRMED live 2026-07-27** — but via a different mechanism than every prior phase's setup
+script pattern: the plain (no `-it`) `docker run` `copilot_docker_setup.py`'s `login()` uses
+completes the OAuth device-flow successfully but then fails to persist the token ("token was not
+saved... install a system keychain or rerun login and accept plaintext storage", exit 1) — this
+minimal container has no system keychain, and the plain-text fallback needs a real allocated TTY to
+even offer, which a non-interactive `subprocess.run` can't provide. **The confirmed-working path is
+running `docker run --rm -it -v cadet-copilot-auth:/root/.copilot cadet-copilot:latest copilot
+login` directly in a real interactive terminal** (mirroring `agy`'s Phase 2 interactive-login
+requirement) and accepting the plaintext-storage prompt. Verified via a real subsequent
+authenticated call. `copilot_docker_setup.py`'s own `login()`/`cadet-setup-copilot-docker` console
+script should be treated as non-functional as currently written — see `providers/copilot.py`'s
+module docstring for the full story.
 
 - **Image**: `docker/copilot/Dockerfile` — `node:22-bookworm-slim` base (not `debian:bookworm-slim`
   + a raw binary download like `agy`/`codex`/`cursor`'s images) since `@github/copilot` is an npm
@@ -268,24 +275,23 @@ prior phase's rollout note once it went from "wired up" to "verified."
   installed package's own `package.json` to pin against). Built/tagged locally as
   `cadet-copilot:latest` (`docker build -t cadet-copilot:latest docker/copilot/`) — no registry,
   single machine only.
-- **Auth (UNCONFIRMED)**: two mechanisms, mirroring `cursor`'s "auth volume primary, key/token
-  optional override" shape:
+- **Auth**: two mechanisms, mirroring `cursor`'s "auth volume primary, key/token optional override"
+  shape:
   1. A `cadet-copilot-auth` Docker named volume (see `CADET_COPILOT_AUTH_VOLUME` in
      [CONFIGURATION.md](./CONFIGURATION.md)) mounted at `/root/.copilot` — the CLI's own default
-     `COPILOT_HOME`. `copilot login --help` documents that the OAuth device-flow token is normally
-     stored in the OS credential store, falling back to a plain-text file under `~/.copilot/` only
-     "if a credential store is not found" — expected (not yet confirmed) to be the case inside this
-     minimal container. `src/cadet/process/copilot_docker_setup.py`
-     (`cadet-setup-copilot-docker` console script) wraps a one-time `copilot login` against this
-     volume and a coarse `--check` (a throwaway-container file-presence scan — no confirmed
-     `status`/`whoami` subcommand exists for `copilot` the way `agent status` does for `cursor`).
+     `COPILOT_HOME`. **CONFIRMED working, but only via a manually-run `docker run -it ... copilot
+     login`** (real interactive terminal, accepting the plaintext-storage prompt) — see the callout
+     above. `src/cadet/process/copilot_docker_setup.py`'s `login()`/`cadet-setup-copilot-docker`
+     console script does NOT work (no `-it`); its `check_volume()`/`--check` (a throwaway-container
+     file-presence scan) still works fine as a read-only check.
   2. `COPILOT_GITHUB_TOKEN` (`config.get_copilot_github_token()`, `CADET_COPILOT_GITHUB_TOKEN` env
      var), forwarded via `-e` when set. Per `copilot login --help`/`copilot help environment` (real
-     vendor docs, confirmed by reading `--help` output on this machine — **not** by a live
-     authenticated call), this takes precedence over any stored credential. A fine-grained PAT with
-     the "Copilot Requests" permission, or a `gh` CLI OAuth token, both work; classic PATs (`ghp_`)
-     are explicitly not supported. This is the more likely-to-work-first path, needing no
-     interactive device-flow step inside the container at all.
+     vendor docs, confirmed by reading `--help` output on this machine — **not yet exercised with a
+     real token end-to-end**), this takes precedence over any stored credential. A fine-grained PAT
+     with the "Copilot Requests" permission (only appears in GitHub's token-creation UI when
+     Resource owner is your personal account, not an organization) or a `gh` CLI OAuth token both
+     work; classic PATs (`ghp_`) are explicitly not supported. Needs no interactive device-flow step
+     at all if you have a token handy.
 - **The Windows-host-building-Linux-argv bug**: same shape as `cursor`'s Phase 4 fix. `copilot.py`'s
   pre-existing `build_argv` has an `if sys.platform == "win32":` branch (resolves `node.exe` +
   `npm-loader.js` next to the native Windows npm-global install — see "Validated `copilot` CLI
@@ -324,10 +330,15 @@ prior phase's rollout note once it went from "wired up" to "verified."
 - **Known open issue (not `copilot`-specific — also affects `agy`/`codex`/`cursor`)**: the same
   fast-cancel orphaned-`Created`-container race described in "Containerized `codex` execution"
   above applies here too — not yet fixed in `treekill.stop_container`.
-- **Known open issue (`copilot`-specific)**: the entire auth story above is unconfirmed — see the
-  callout at the top of this section. A live `copilot login` attempt inside the container, and/or a
-  real PAT/token, is needed before this phase can be considered genuinely done the way `cursor`'s
-  Phase 4 was.
+- **Known open issue (`copilot`-specific)**: `copilot_docker_setup.py`'s `login()` (the
+  `cadet-setup-copilot-docker` console script, no `-it`) does not work — see the callout at the top
+  of this section. The real setup step is the manual `docker run -it ...` command until/unless this
+  script is fixed (unclear how, from a non-interactive Python `subprocess.run`) or a token
+  (`CADET_COPILOT_GITHUB_TOKEN`) is used instead.
+- **Remaining before this phase fully matches `cursor`'s Phase 4 closure**: a real
+  `delegate_task(provider="copilot", ...)` call through the actual MCP tool (dispatcher/reconcile/
+  job_store wiring) has not yet been exercised — only raw `docker run` calls so far, same "one gap"
+  `cursor`'s Phase 4 handoff flagged before its own live MCP verification.
 
 ## The `context_id` thread
 

@@ -68,10 +68,11 @@ shape as `agy`'s Phase 2), not a plain API key — see `cadet-setup-cursor-docke
 
 `copilot` is containerized (Phase 5, mirrors `cursor`) — `CADET_COPILOT_PATH`/
 `CADET_COPILOT_NODE_PATH` (host binary + Node.js paths) are retired, replaced by Docker image
-resolution. Auth is **UNCONFIRMED** (no live login has been run against a real container yet — see
-[ARCHITECTURE.md](./ARCHITECTURE.md#containerized-copilot-execution)): a Docker named volume
-(OAuth-style, same shape as `cursor`'s Phase 4) is primary, with an optional token env var as a
-simpler override — see `cadet-setup-copilot-docker` below.
+resolution. Auth is **confirmed working** (see
+[ARCHITECTURE.md](./ARCHITECTURE.md#containerized-copilot-execution)) via a Docker named volume
+populated by a **manually-run** `docker run -it ... copilot login` (the `cadet-setup-copilot-docker`
+console script itself does not work — it lacks the real TTY the login needs), with an optional
+token env var as a simpler override — see `cadet-setup-copilot-docker` below.
 
 | Var | Default | Purpose |
 |---|---|---|
@@ -203,20 +204,34 @@ is normally stored in the OS credential store on a full desktop OS, falling back
 file under `~/.copilot/` only "if a credential store is not found."
 
 ```
-cadet-setup-copilot-docker          # creates the volume if needed and runs `copilot login` against it
+cadet-setup-copilot-docker          # DOES NOT WORK for the actual login -- see below
 cadet-setup-copilot-docker --check  # reports whether the volume holds any credential file at all, no write
 ```
 
-**UNCONFIRMED — this has not been live-tested against a real container** (unlike every other
-provider's setup script, each of which was verified end-to-end before being wired up). Open
-questions for whoever runs it first: whether the container's lack of an OS credential store
-reliably triggers the plain-text-file fallback as expected; whether `copilot login`'s browser-launch
-attempt needs an env var to suppress (no `NO_OPEN_BROWSER`-equivalent was found in `copilot
---help`/`copilot help environment`, unlike cursor's documented one); and the exact filename(s)
-`check_volume` should look for once a real login has been observed (it currently just checks
-whether *any* file exists under the mount). If a token is available instead
-(`CADET_COPILOT_GITHUB_TOKEN`, see the env var table above), this whole script can likely be
-skipped — that path needs no interactive login step.
+**The `cadet-setup-copilot-docker` login flow (no `--check`) is CONFIRMED NOT TO WORK** — it uses a
+plain (no `-it`) `subprocess.run(["docker", "run", "--rm", ...])`, which completes the OAuth
+device-flow successfully but then fails with "Login succeeded, but the token was not saved. Install
+a system keychain or rerun login and accept plaintext storage." (exit 1): this minimal container has
+no system keychain, and the plain-text fallback needs a real allocated TTY to even offer, which a
+non-interactive `subprocess.run` cannot provide (confirmed twice; piping stdin answers via `-i`
+alone, no `-t`, made no difference).
+
+**The confirmed-working setup step instead** is running this yourself in a real interactive
+terminal (not through an automation harness — mirrors `agy`'s Phase 2 interactive-login
+requirement):
+
+```
+docker run --rm -it -v cadet-copilot-auth:/root/.copilot cadet-copilot:latest copilot login
+```
+
+Open the printed `github.com/login/device` URL, enter the code, approve, and accept the
+plaintext-storage prompt when it appears (it only appears with a real TTY present). The token then
+persists in the `cadet-copilot-auth` volume for every subsequent containerized `copilot` job — this
+one interactive run is a one-time step, not per-job. Verify afterward with `cadet-setup-copilot-docker
+--check` (which does work, being read-only) or a real call: `docker run --rm -v
+cadet-copilot-auth:/root/.copilot cadet-copilot:latest copilot -p "..." --allow-all-tools --model
+auto ...`. If a token is available instead (`CADET_COPILOT_GITHUB_TOKEN`, see the env var table
+above), this whole login dance can be skipped — that path needs no interactive step at all.
 
 ## Companion script: `cadet-wait-for-job`
 

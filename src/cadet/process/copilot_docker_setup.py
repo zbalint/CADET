@@ -28,12 +28,24 @@ def login(volume_name=None, image=None) -> dict:
     the printed device-flow URL/code to complete in a browser. Blocks until
     the flow completes or fails.
 
-    UNCONFIRMED: no NO_OPEN_BROWSER-equivalent env var was found in
-    `copilot login --help`/`copilot help environment` the way cursor's OAuth
-    flow documents one -- this container has no browser to launch, so if
-    `copilot login` attempts to auto-open one internally, that attempt is
-    expected to just silently fail while the flow still proceeds via the
-    printed URL, but this has not been live-tested."""
+    **CONFIRMED NON-FUNCTIONAL AS WRITTEN (2026-07-27)**: this plain
+    `subprocess.run(["docker", "run", "--rm", ...])` call (no `-it`) was
+    tried twice, both times completing the OAuth device-flow successfully
+    but then failing to persist the token ("Login succeeded, but the token
+    was not saved. Install a system keychain or rerun login and accept
+    plaintext storage.", exit 1) -- this container has no system keychain,
+    and the plain-text fallback `copilot login --help` documents requires a
+    real allocated TTY to even offer, which a non-interactive
+    `subprocess.run` cannot provide (confirmed: piping answers via stdin
+    with `-i` alone, no `-t`, made no difference). **The only path confirmed
+    to work is running `docker run --rm -it -v <volume>:/root/.copilot
+    <image> copilot login` directly in a real interactive terminal** --
+    mirroring agy's Phase 2 interactive-login requirement. This function is
+    kept for reference/potential future fixing, but `main()` (the
+    `cadet-setup-copilot-docker` console script) should not be relied on for
+    the actual login step; treat the manual `docker run -it` command above
+    as the real setup instruction (see docs/CONFIGURATION.md's
+    "Setup step: cadet-setup-copilot-docker" section)."""
     volume_name = volume_name or config.get_copilot_auth_volume()
     image = image or config.get_copilot_docker_image()
 
