@@ -42,9 +42,14 @@ class Dispatcher:
     never awaits subprocess completion itself. One long-lived loop (`start`)
     owns dispatch; each dispatched job runs as its own independent task."""
 
-    def __init__(self, executable_paths: dict, max_concurrent: int | None = None, db_path: str | None = None):
+    def __init__(
+        self, executable_paths: dict, max_concurrent: int | None = None, db_path: str | None = None,
+        owner_pid: int | None = None, server_instance_id: str | None = None,
+    ):
         self.executable_paths = executable_paths
         self.db_path = db_path
+        self.owner_pid = owner_pid
+        self.server_instance_id = server_instance_id
         self._queue: asyncio.Queue = asyncio.Queue()
         self._semaphore = asyncio.Semaphore(max_concurrent or config.get_max_concurrent())
         self._cancel_flags: set = set()
@@ -130,7 +135,11 @@ class Dispatcher:
             # launcher.stop_agy / providers.codex.stop / treekill.stop_container).
             stop_fn = self._stop_fns()[provider_name]
 
-            won = job_store.mark_running(job_id, proc.pid, _now_iso(), db_path=self.db_path)
+            won = job_store.mark_running(
+                job_id, proc.pid, _now_iso(),
+                owner_pid=self.owner_pid, server_instance_id=self.server_instance_id,
+                db_path=self.db_path,
+            )
             if not won:
                 # Lost the race to a cancel_task that landed between the pending
                 # check above and this write. The row is already terminal

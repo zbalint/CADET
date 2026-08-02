@@ -65,11 +65,17 @@ class TestInsertAndGet(JobStoreTestCase):
 class TestMarkRunning(JobStoreTestCase):
     def test_mark_running_from_pending_succeeds(self):
         self._insert(status="pending")
-        won = job_store.mark_running("job-1", pid=1234, started_at="2026-07-26T00:00:01", db_connection=self.conn)
+        won = job_store.mark_running(
+            "job-1", pid=1234, started_at="2026-07-26T00:00:01",
+            owner_pid=5678, server_instance_id="srv-abc",
+            db_connection=self.conn,
+        )
         self.assertTrue(won)
         job = job_store.get_job("job-1", db_connection=self.conn)
         self.assertEqual(job["status"], "running")
         self.assertEqual(job["pid"], 1234)
+        self.assertEqual(job["owner_pid"], 5678)
+        self.assertEqual(job["server_instance_id"], "srv-abc")
 
     def test_mark_running_from_non_pending_noops(self):
         self._insert(status="cancelled")

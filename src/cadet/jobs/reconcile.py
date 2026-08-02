@@ -41,10 +41,13 @@ async def reconcile_on_startup(dispatcher, db_path=None) -> dict:
     loop starts consuming from the queue.
 
     - `pending` rows: no OS process ever existed for these — simply re-enqueue.
-    - `running` rows: the previous process's asyncio.subprocess handle is gone
-      and cannot be re-attached. Best-effort liveness-check the recorded pid,
-      tree-kill if still alive for a deterministic clean slate, then
-      unconditionally mark the row `unknown-interrupted` regardless of outcome.
+    - `running` rows: check `owner_pid`. If set and `_is_pid_alive(owner_pid)` is
+      True, skip it entirely (it belongs to a live sibling server instance).
+      Otherwise, if `owner_pid` is NULL (legacy row from before WP1 migration) or
+      the owner PID is dead, run the kill-and-mark-interrupted logic: for
+      containerized providers (`agy`, `codex`, `cursor`, `copilot`), stop the
+      container; for native PIDs, tree-kill if alive; then mark the row
+      `unknown-interrupted`.
 
     Returns a small summary dict for startup logging.
     """
@@ -53,7 +56,12 @@ async def reconcile_on_startup(dispatcher, db_path=None) -> dict:
         await dispatcher.enqueue(job["job_id"])
 
     running_jobs = job_store.list_jobs(status_filter="running", limit=10_000, db_path=db_path)
+    interrupted_count = 0
     for job in running_jobs:
+        owner_pid = job.get("owner_pid")
+        if owner_pid is not None and _is_pid_alive(owner_pid):
+            continue
+
         provider_name = job["provider"] or "agy"
         pid = job["pid"]
         if provider_name in ("agy", "codex", "cursor", "copilot"):
@@ -83,5 +91,6 @@ async def reconcile_on_startup(dispatcher, db_path=None) -> dict:
         job_store.mark_unknown_interrupted(
             job["job_id"], error_message=error_message, finished_at=_now_iso(), db_path=db_path
         )
+        interrupted_count += 1
 
-    return {"reenqueued": len(pending_jobs), "interrupted": len(running_jobs)}
+    return {"reenqueued": len(pending_jobs), "interrupted": interrupted_count}

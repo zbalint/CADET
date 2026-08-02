@@ -37,15 +37,19 @@ def get_job(job_id, db_connection=None, db_path=None):
         return _row_to_dict(row)
 
 
-def mark_running(job_id, pid, started_at, db_connection=None, db_path=None) -> bool:
+def mark_running(
+    job_id, pid, started_at, owner_pid=None, server_instance_id=None,
+    db_connection=None, db_path=None,
+) -> bool:
     """Conditional UPDATE: only succeeds if the row is still 'pending' — catches a
     cancel_task that raced in while the job was queued."""
     with managed_connection(db_connection, db_path) as conn:
         with conn:
             cur = conn.execute(
-                "UPDATE jobs SET status = 'running', pid = ?, started_at = ? "
+                "UPDATE jobs SET status = 'running', pid = ?, started_at = ?, "
+                "owner_pid = ?, server_instance_id = ? "
                 "WHERE job_id = ? AND status = 'pending'",
-                (pid, started_at, job_id),
+                (pid, started_at, owner_pid, server_instance_id, job_id),
             )
             return cur.rowcount == 1
 

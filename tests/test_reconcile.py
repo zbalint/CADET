@@ -29,7 +29,7 @@ class ReconcileTestCase(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _insert(self, job_id, status, pid=None, provider="agy"):
+    def _insert(self, job_id, status, pid=None, provider="agy", owner_pid=None, server_instance_id=None):
         job_store.insert_job(
             job_id=job_id, context_id="ctx-1", label="test",
             prompt_path=f"/logs/{job_id}/prompt.txt", cwd="C:\\scratch",
@@ -41,7 +41,11 @@ class ReconcileTestCase(unittest.IsolatedAsyncioTestCase):
             db_path=self.db_path,
         )
         if status == "running" and pid is not None:
-            job_store.mark_running(job_id, pid=pid, started_at="2026-07-26T00:00:01", db_path=self.db_path)
+            job_store.mark_running(
+                job_id, pid=pid, started_at="2026-07-26T00:00:01",
+                owner_pid=owner_pid, server_instance_id=server_instance_id,
+                db_path=self.db_path,
+            )
 
 
 class TestReconcileOnStartup(ReconcileTestCase):
@@ -174,6 +178,50 @@ class TestReconcileOnStartup(ReconcileTestCase):
 
         self.assertEqual(job_store.get_job("job-succeeded", db_path=self.db_path)["status"], "succeeded")
         self.assertNotIn("job-succeeded", self.dispatcher.enqueued)
+
+    async def test_running_job_with_alive_owner_pid_is_skipped(self):
+        my_pid = os.getpid()
+        self._insert("job-running-alive-owner", status="pending", provider="agy")
+        job_store.mark_running(
+            "job-running-alive-owner", pid=7777, started_at="t1",
+            owner_pid=my_pid, server_instance_id="srv-1",
+            db_path=self.db_path,
+        )
+
+        with patch("cadet.jobs.reconcile.stop_container") as mock_stop, \
+             patch("cadet.jobs.reconcile.kill_process_tree") as mock_kill:
+            summary = await reconcile_on_startup(self.dispatcher, db_path=self.db_path)
+
+        self.assertEqual(summary["interrupted"], 0)
+        mock_stop.assert_not_called()
+        mock_kill.assert_not_called()
+
+        job = job_store.get_job("job-running-alive-owner", db_path=self.db_path)
+        self.assertEqual(job["status"], "running")
+        self.assertEqual(job["pid"], 7777)
+        self.assertEqual(job["owner_pid"], my_pid)
+        self.assertEqual(job["server_instance_id"], "srv-1")
+
+    async def test_running_job_with_dead_or_null_owner_pid_is_interrupted(self):
+        # Case 1: NULL owner_pid (legacy row)
+        self._insert("job-null-owner", status="pending", provider="agy")
+        job_store.mark_running("job-null-owner", pid=8888, started_at="t1", owner_pid=None, db_path=self.db_path)
+
+        # Case 2: Dead owner_pid (e.g. 999999)
+        self._insert("job-dead-owner", status="pending", provider="agy")
+        job_store.mark_running("job-dead-owner", pid=9999, started_at="t1", owner_pid=999999, db_path=self.db_path)
+
+        with patch("cadet.jobs.reconcile.stop_container") as mock_stop:
+            summary = await reconcile_on_startup(self.dispatcher, db_path=self.db_path)
+
+        self.assertEqual(summary["interrupted"], 2)
+        self.assertEqual(mock_stop.call_count, 2)
+
+        job_null = job_store.get_job("job-null-owner", db_path=self.db_path)
+        self.assertEqual(job_null["status"], "unknown-interrupted")
+
+        job_dead = job_store.get_job("job-dead-owner", db_path=self.db_path)
+        self.assertEqual(job_dead["status"], "unknown-interrupted")
 
 
 if __name__ == "__main__":

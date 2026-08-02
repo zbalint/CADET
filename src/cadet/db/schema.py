@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   skip_permissions         INTEGER NOT NULL DEFAULT 0,
   skip_quota_check         INTEGER NOT NULL DEFAULT 0,
   pid                      INTEGER,
+  owner_pid                INTEGER,
+  server_instance_id       TEXT,
   status                   TEXT NOT NULL,
   created_at               TEXT NOT NULL,
   started_at               TEXT,
@@ -71,6 +73,20 @@ def _ensure_quota_reset_confidence_column(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN quota_reset_confidence TEXT")
 
 
+def _ensure_owner_pid_column(conn: sqlite3.Connection) -> None:
+    """Migration for DBs created before the owner_pid column existed."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "owner_pid" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN owner_pid INTEGER")
+
+
+def _ensure_server_instance_id_column(conn: sqlite3.Connection) -> None:
+    """Migration for DBs created before the server_instance_id column existed."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    if "server_instance_id" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN server_instance_id TEXT")
+
+
 def init_db(db_path: str) -> sqlite3.Connection:
     """Create the jobs and provider_status tables (and supporting indexes) if
     they don't already exist. Returns an open connection to the caller,
@@ -81,6 +97,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
         _ensure_provider_column(conn)
         _ensure_skip_quota_check_column(conn)
         _ensure_quota_reset_confidence_column(conn)
+        _ensure_owner_pid_column(conn)
+        _ensure_server_instance_id_column(conn)
         conn.execute(_CREATE_PROVIDER_STATUS_TABLE)
         for stmt in _CREATE_INDEXES:
             conn.execute(stmt)

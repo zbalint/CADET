@@ -1,8 +1,10 @@
 import asyncio
-import sys
 import logging
+import os
+import sys
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
+from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
 
@@ -34,6 +36,9 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
     conn = init_db(db_path)
     conn.close()
 
+    server_instance_id = uuid4().hex
+    owner_pid = os.getpid()
+
     # "agy" is required/fail-fast at server bootstrap (see __main__.py); other
     # providers are optional here — an unconfigured one just isn't in the dict,
     # and delegate_task rejects requests for it per-call with a clean error.
@@ -46,7 +51,11 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[dict]:
         except RuntimeError:
             pass
     dispatcher = Dispatcher(
-        executable_paths=executable_paths, max_concurrent=config.get_max_concurrent(), db_path=db_path
+        executable_paths=executable_paths,
+        max_concurrent=config.get_max_concurrent(),
+        db_path=db_path,
+        owner_pid=owner_pid,
+        server_instance_id=server_instance_id,
     )
 
     # Deferred import (not at module load time) to avoid a server<->tools

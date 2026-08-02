@@ -74,26 +74,14 @@ Run once, inside the FastMCP `lifespan` hook (mirroring SALTMDB's own
 1. Open the SQLite DB (`CADET_STATE_DIR/state/cadet.db`).
 2. **`status='pending'` rows**: no OS process ever existed for these — simply re-enqueue their
    `job_id`s onto a fresh `asyncio.Queue`. Nothing was lost; they dispatch normally.
-3. **`status='running'` rows**: the previous process's `asyncio.subprocess` handle is gone and
-   cannot be re-attached — you cannot portably `wait()`/reap a process you didn't spawn as a
-   child, and Windows offers no cheap way to recover its eventual real exit code. For each:
-   - **`agy` jobs**: the recorded `pid` is the previous `docker run` client's PID, not the
-     container's own lifetime (a daemon-managed object independent of that client process) — no
-     PID liveness check is meaningful here. Unconditionally `stop_container` the deterministic
-     `cadet-agy-<job_id>` name instead; stopping an already-gone container is itself a tolerated
-     no-op, so this is safe to call regardless of whether the container is still actually running.
-   - **`codex`/`cursor`/`copilot` jobs** (unchanged): best-effort check whether the recorded `pid`
-     is still alive; if so, best-effort tree-kill it (see Process Management) for a deterministic
-     clean slate.
-   - Regardless of outcome, mark the row `unknown-interrupted` with an `error_message` describing
-     what reconciliation found/did, e.g. `"pid 12345 not found at restart"`,
-     `"pid 12345 still alive at restart; force-killed"`, or (for `agy`) `"agy container
-     force-stopped at restart (previous CADET instance's lifetime unknown)"`.
+3. **`status='running'` rows**: check the recorded `owner_pid` (the PID of the CADET server process that spawned the job):
+   - **`owner_pid` is set and alive (`_is_pid_alive(owner_pid)` is True)**: skip the row entirely. The job belongs to a live sibling server instance (e.g. running in another Claude Code session) and must not be interrupted.
+   - **`owner_pid` is NULL (legacy row from before per-owner tracking) or owner process is dead**:
+     - **Containerized jobs (`agy`, `codex`, `cursor`, `copilot`)**: stop the container (`cadet-<provider>-<job_id>`); stopping an already-gone container is a tolerated no-op.
+     - **Native process jobs**: check whether the job's recorded `pid` is still alive; if so, tree-kill it for a clean slate.
+     - Mark the row `unknown-interrupted` with an `error_message` describing what reconciliation found/did.
 
-**This is a documented limitation, not solved further**: if CADET restarts mid-job, that job's
-true outcome is unrecoverable. Its logs remain on disk up to their last flush for manual
-inspection via `get_task_output`'s returned log paths. PID-reuse false positives during the
-liveness check are accepted as a known, low-probability edge case.
+Each CADET server process records its own PID (`owner_pid`) and a unique `server_instance_id` when marking a job running. During startup reconciliation, CADET checks whether the `owner_pid` of each running job belongs to a live process; active jobs owned by sibling server instances are left untouched. If an owner process died mid-job, its orphan containers or processes are cleaned up and marked `unknown-interrupted`. PID-reuse false positives during the liveness check remain an accepted, low-probability edge case (a dead process's PID could theoretically be reused by an unrelated process before reconciliation runs).
 
 ## Process management
 

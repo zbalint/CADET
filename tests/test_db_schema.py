@@ -8,9 +8,9 @@ from cadet.db.schema import init_db
 
 EXPECTED_COLUMNS = {
     "job_id", "context_id", "label", "prompt_path", "cwd", "provider", "model", "effort",
-    "skip_permissions", "skip_quota_check", "pid", "status", "created_at", "started_at", "finished_at",
-    "exit_code", "timeout_s", "stdout_log_path", "stderr_log_path", "error_message",
-    "error_kind", "quota_reset_at", "quota_reset_confidence",
+    "skip_permissions", "skip_quota_check", "pid", "owner_pid", "server_instance_id", "status",
+    "created_at", "started_at", "finished_at", "exit_code", "timeout_s", "stdout_log_path",
+    "stderr_log_path", "error_message", "error_kind", "quota_reset_at", "quota_reset_confidence",
 }
 
 EXPECTED_PROVIDER_STATUS_COLUMNS = {
@@ -112,6 +112,31 @@ class TestInitDb(unittest.TestCase):
             self.assertEqual(cols, EXPECTED_COLUMNS)
             row = conn.execute("SELECT skip_quota_check FROM jobs WHERE job_id = 'job-1'").fetchone()
             self.assertEqual(row[0], 0)
+        finally:
+            conn.close()
+
+    def test_migration_adds_owner_pid_and_server_instance_id_columns_to_pre_existing_db(self):
+        pre_migration_columns = EXPECTED_COLUMNS - {"owner_pid", "server_instance_id"}
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cols_sql = ", ".join(f"{c} TEXT" for c in pre_migration_columns if c != "job_id")
+            conn.execute(f"CREATE TABLE jobs (job_id TEXT PRIMARY KEY, {cols_sql})")
+            conn.execute(
+                "INSERT INTO jobs (job_id, context_id, prompt_path, cwd, provider, status, created_at, "
+                "timeout_s, stdout_log_path, stderr_log_path) VALUES "
+                "('job-1', 'ctx-1', 'p.txt', 'C:\\\\x', 'agy', 'succeeded', 't1', '30', 'o.log', 'e.log')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        conn = init_db(self.db_path)
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs);").fetchall()}
+            self.assertEqual(cols, EXPECTED_COLUMNS)
+            row = conn.execute("SELECT owner_pid, server_instance_id FROM jobs WHERE job_id = 'job-1'").fetchone()
+            self.assertIsNone(row[0])
+            self.assertIsNone(row[1])
         finally:
             conn.close()
 
