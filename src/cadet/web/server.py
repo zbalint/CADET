@@ -39,6 +39,15 @@ async def run_web_server(dispatcher, db_path: str) -> None:
     )
     try:
         await _EmbeddedServer(uv_config).serve()
+    except SystemExit:
+        # uvicorn.Server.startup() catches the bind OSError itself and calls
+        # sys.exit(), not raise — that's a SystemExit (BaseException), which
+        # `except Exception` below does NOT catch. Left uncaught, asyncio
+        # re-raises SystemExit/KeyboardInterrupt out of the Task step instead
+        # of containing it, which kills the whole event loop — i.e. the
+        # entire MCP server process, not just this task. See SALTMDB memory
+        # 56cc7391 for the live-reproduction trace this fixes.
+        logger.warning("Web dashboard failed to start (port already in use?); MCP tool surface remains available.")
     except Exception:
         # The dashboard is a convenience layer, not the primary contract — a
         # bind failure (e.g. port already in use) must not take down the MCP
