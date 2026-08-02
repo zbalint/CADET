@@ -126,22 +126,28 @@ class TestGetTaskOutput(WebApiTestCase):
 
     def test_reads_log_files(self):
         job_dir = self._insert("job-1")
+        with open(os.path.join(job_dir, "prompt.txt"), "w", encoding="utf-8") as f:
+            f.write("test prompt content\nline 2\n")
         with open(os.path.join(job_dir, "stdout.log"), "w", encoding="utf-8") as f:
             f.write("line1\nline2\nline3\n")
 
         resp = self.client.get("/api/tasks/job-1/output")
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
+        self.assertEqual(body["prompt"], "test prompt content\nline 2\n")
         self.assertEqual(body["stdout"], "line1\nline2\nline3\n")
         self.assertFalse(body["truncated"])
 
     def test_tail_lines_truncates(self):
         job_dir = self._insert("job-1")
+        with open(os.path.join(job_dir, "prompt.txt"), "w", encoding="utf-8") as f:
+            f.write("line1\nline2\nline3\n")
         with open(os.path.join(job_dir, "stdout.log"), "w", encoding="utf-8") as f:
             f.write("line1\nline2\nline3\n")
 
         resp = self.client.get("/api/tasks/job-1/output", params={"tail_lines": 1})
         body = resp.json()
+        self.assertEqual(body["prompt"], "line1\nline2\nline3\n")
         self.assertEqual(body["stdout"], "line3\n")
         self.assertTrue(body["truncated"])
 

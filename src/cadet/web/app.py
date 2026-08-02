@@ -59,11 +59,14 @@ def create_app(dispatcher, db_path: str) -> FastAPI:
 
         stdout, stdout_truncated = status_shaping.read_log(job["stdout_log_path"], tail_lines)
         stderr, stderr_truncated = status_shaping.read_log(job["stderr_log_path"], tail_lines)
+        # Note: prompt_path is always sourced from the DB row, never from any request parameter (no path traversal).
+        prompt_text, _ = status_shaping.read_log(job["prompt_path"])
         shaped = status_shaping.shape_status_dict(job, db_path=app.state.db_path)
 
         return {
             "job_id": job_id,
             "status": job["status"],
+            "prompt": prompt_text,
             "stdout": stdout,
             "stderr": stderr,
             "exit_code": job["exit_code"],
