@@ -65,6 +65,18 @@ class TestBuildDockerArgv(unittest.TestCase):
         self.assertIn("--cap-drop=ALL", argv)
         self.assertIn("--security-opt=no-new-privileges", argv)
 
+    def test_host_uid_gid_flags_present(self):
+        """docker_user_flags() -- see test_docker_user_flags.py -- lets
+        entrypoint.sh drop from root to the host UID/GID so writes to the
+        bind-mounted /workspace actually land despite --cap-drop=ALL."""
+        argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
+        joined = " ".join(argv)
+        self.assertIn("--cap-add=CHOWN", argv)
+        self.assertIn("--cap-add=SETUID", argv)
+        self.assertIn("--cap-add=SETGID", argv)
+        self.assertIn("HOST_UID=", joined)
+        self.assertIn("HOST_GID=", joined)
+
     def test_no_network_none_flag(self):
         argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
         self.assertNotIn("--network", argv)

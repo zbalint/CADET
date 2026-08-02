@@ -1,7 +1,36 @@
 import asyncio
+import os
 import subprocess
 
 from cadet import config
+
+
+def docker_user_flags() -> list[str]:
+    """POSIX hosts only: passes the host UID/GID into the container via -e
+    HOST_UID/HOST_GID so entrypoint.sh can chown its auth volume and drop
+    from root to that UID/GID (via setpriv) before exec'ing the real CLI --
+    fixes --cap-drop=ALL leaving root unable to write bind-mounted
+    /workspace files owned by the host user (CAP_DAC_OVERRIDE is stripped).
+    --cap-add=CHOWN/SETUID/SETGID re-grants just enough capability for that
+    one entrypoint-time chown-then-drop (chown of the auth volume needs
+    CAP_CHOWN too -- confirmed empirically, "Operation not permitted"
+    without it even with SETUID/SETGID present); the kernel clears the
+    process's capability sets automatically once it crosses uid 0 ->
+    non-zero (no keepcaps), so the CLI itself never actually runs with
+    elevated caps -- net security posture is unchanged from plain
+    --cap-drop=ALL.
+
+    os.getuid is absent on Windows, which is the correct signal to skip
+    this entirely: Docker Desktop's WSL2-backend bind mounts don't enforce
+    the same strict POSIX DAC checks that trigger this bug on native
+    Linux/WSL2, so Windows hosts never hit it and get the old (root,
+    no-drop) container behavior unchanged."""
+    if not hasattr(os, "getuid"):
+        return []
+    return [
+        "--cap-add=CHOWN", "--cap-add=SETUID", "--cap-add=SETGID",
+        "-e", f"HOST_UID={os.getuid()}", "-e", f"HOST_GID={os.getgid()}",
+    ]
 
 
 def container_name_for_job(provider: str, job_id: str) -> str:
@@ -59,6 +88,7 @@ def build_argv(
         "--pids-limit", str(config.get_agy_container_pids_limit()),
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
+        *docker_user_flags(),
         image,
     ]
     argv += _inner_agy_argv(prompt_text, timeout_s, model, effort, skip_permissions, sandbox)

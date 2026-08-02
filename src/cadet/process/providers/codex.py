@@ -138,7 +138,7 @@ def build_docker_argv(
     (:ro vs default :rw) -- kernel VFS enforcement, not subject to the same
     userns restriction."""
     from cadet import config
-    from cadet.process.launcher import container_name_for_job
+    from cadet.process.launcher import container_name_for_job, docker_user_flags
 
     name = container_name_for_job("codex", job_id)
     mount_suffix = ":ro" if (sandbox and not skip_permissions) else ""
@@ -151,6 +151,7 @@ def build_docker_argv(
         "--pids-limit", str(config.get_codex_container_pids_limit()),
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
+        *docker_user_flags(),
         image,
     ]
     argv += build_argv("codex", prompt_text, "/workspace", timeout_s, model, effort, skip_permissions=True, sandbox=sandbox)

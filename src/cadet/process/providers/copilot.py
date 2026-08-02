@@ -321,7 +321,7 @@ def build_docker_argv(
        precedence over any stored credential, mirroring CURSOR_API_KEY's
        optional-override relationship to cursor's own auth volume."""
     from cadet import config
-    from cadet.process.launcher import container_name_for_job
+    from cadet.process.launcher import container_name_for_job, docker_user_flags
 
     name = container_name_for_job("copilot", job_id)
     mount_suffix = ":ro" if (sandbox and not skip_permissions) else ""
@@ -334,6 +334,7 @@ def build_docker_argv(
         "--pids-limit", str(config.get_copilot_container_pids_limit()),
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
+        *docker_user_flags(),
     ]
     token = config.get_copilot_github_token()
     if token:

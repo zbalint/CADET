@@ -241,7 +241,7 @@ def build_docker_argv(
     codex's Phase 3, even though the CLI-level flags are now known to work
     correctly on their own too."""
     from cadet import config
-    from cadet.process.launcher import container_name_for_job
+    from cadet.process.launcher import container_name_for_job, docker_user_flags
 
     name = container_name_for_job("cursor", job_id)
     mount_suffix = ":ro" if (sandbox and not skip_permissions) else ""
@@ -254,6 +254,7 @@ def build_docker_argv(
         "--pids-limit", str(config.get_cursor_container_pids_limit()),
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
+        *docker_user_flags(),
     ]
     api_key = config.get_cursor_api_key()
     if api_key:

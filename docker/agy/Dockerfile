@@ -31,6 +31,14 @@ RUN curl -fsSL "${AGY_TARBALL_URL}" -o /tmp/agy.tar.gz \
 # allow-list runs git status/log/show against exactly this mount.
 RUN git config --system --add safe.directory /workspace
 
+# Debian's /root defaults to 0700, which blocks traversal for any non-root
+# UID -- entrypoint.sh drops from root to the host's UID/GID (see its own
+# comment) so this container can actually write bind-mounted files owned by
+# the host user under --cap-drop=ALL. o+x alone (no r/w) only grants path
+# traversal into /root, not read/write of its contents.
+RUN chmod o+x /root
+ENV AUTH_DIR=/root/.gemini
+
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

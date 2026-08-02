@@ -64,9 +64,10 @@ class TestBuildDockerArgv(unittest.TestCase):
     def test_api_key_forwarded_as_env_var_when_set(self):
         with patch.dict(os.environ, {"CADET_CURSOR_API_KEY": API_KEY}):
             argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
-        self.assertIn("-e", argv)
-        idx = argv.index("-e")
-        self.assertEqual(argv[idx + 1], f"CURSOR_API_KEY={API_KEY}")
+        target = f"CURSOR_API_KEY={API_KEY}"
+        self.assertIn(target, argv)
+        idx = argv.index(target)
+        self.assertEqual(argv[idx - 1], "-e")
 
     def test_no_api_key_required_missing_does_not_raise(self):
         """Unlike the initial (unverified) API-key-only design, the auth
@@ -81,6 +82,18 @@ class TestBuildDockerArgv(unittest.TestCase):
         self.assertIn("--pids-limit", argv)
         self.assertIn("--cap-drop=ALL", argv)
         self.assertIn("--security-opt=no-new-privileges", argv)
+
+    def test_host_uid_gid_flags_present(self):
+        """docker_user_flags() -- see test_docker_user_flags.py -- lets
+        entrypoint.sh drop from root to the host UID/GID so writes to the
+        bind-mounted /workspace actually land despite --cap-drop=ALL."""
+        argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
+        joined = " ".join(argv)
+        self.assertIn("--cap-add=CHOWN", argv)
+        self.assertIn("--cap-add=SETUID", argv)
+        self.assertIn("--cap-add=SETGID", argv)
+        self.assertIn("HOST_UID=", joined)
+        self.assertIn("HOST_GID=", joined)
 
     def test_no_network_none_flag(self):
         argv = build_docker_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
