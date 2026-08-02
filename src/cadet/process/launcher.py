@@ -50,7 +50,11 @@ def _inner_agy_argv(
     Identical flag logic to CADET's pre-container agy invocation, except
     --add-dir always targets the container-side bind-mount path "/workspace",
     never the host cwd -- getting this wrong reproduces agy's own documented
-    "silent write to the wrong place, false success" bug class."""
+    "silent write to the wrong place, false success" bug class.
+
+    The read-only/read-write distinction skip_permissions and sandbox
+    represent is enforced at the container level by launcher.build_argv's
+    /workspace bind mount (:ro vs default :rw) -- kernel VFS enforcement."""
     argv = [
         "agy", "-p", prompt_text,
         "--add-dir", "/workspace",
@@ -77,11 +81,16 @@ def build_argv(
     stop_agy (treekill.stop_container) can target it later without needing
     any extra state threaded through job_store. No --network flag: agy needs
     outbound HTTPS to Gemini's API, so Docker's default bridge network is
-    left alone (never --network none)."""
+    left alone (never --network none).
+
+    The read-only/read-write distinction skip_permissions and sandbox
+    represent is enforced by the /workspace bind mount itself (:ro vs default
+    :rw) -- kernel VFS enforcement."""
     name = container_name_for_job("agy", job_id)
+    mount_suffix = ":ro" if (sandbox and not skip_permissions) else ""
     argv = [
         "docker", "run", "--rm", "--name", name,
-        "-v", f"{cwd}:/workspace", "-w", "/workspace",
+        "-v", f"{cwd}:/workspace{mount_suffix}", "-w", "/workspace",
         "-v", f"{config.get_agy_gemini_volume()}:/root/.gemini",
         "--memory", config.get_agy_container_memory(),
         "--cpus", config.get_agy_container_cpus(),

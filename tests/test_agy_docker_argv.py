@@ -31,12 +31,22 @@ class TestBuildArgvDockerWrapping(unittest.TestCase):
         argv = build_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
         self.assertEqual(argv[0:5], ["docker", "run", "--rm", "--name", "cadet-agy-job-abc123def456"])
 
-    def test_workspace_bind_mount_uses_host_cwd(self):
+    def test_workspace_bind_mount_uses_host_cwd_read_only_by_default(self):
         argv = build_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
         idx = argv.index("-v")
-        self.assertEqual(argv[idx + 1], f"{CWD}:/workspace")
+        self.assertEqual(argv[idx + 1], f"{CWD}:/workspace:ro")
         self.assertIn("-w", argv)
         self.assertEqual(argv[argv.index("-w") + 1], "/workspace")
+
+    def test_workspace_bind_mount_is_rw_when_skip_permissions(self):
+        argv = build_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID, skip_permissions=True)
+        idx = argv.index("-v")
+        self.assertEqual(argv[idx + 1], f"{CWD}:/workspace")
+
+    def test_workspace_bind_mount_is_rw_when_sandbox_disabled(self):
+        argv = build_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID, sandbox=False)
+        idx = argv.index("-v")
+        self.assertEqual(argv[idx + 1], f"{CWD}:/workspace")
 
     def test_gemini_volume_mounted(self):
         argv = build_argv(IMAGE, PROMPT, CWD, TIMEOUT_S, JOB_ID)
