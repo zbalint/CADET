@@ -283,6 +283,10 @@ async def spawn(
     argv = build_docker_argv(image, prompt_text, cwd, timeout_s, job_id, model, effort, skip_permissions, sandbox)
     return await asyncio.create_subprocess_exec(
         *argv, stdout=stdout_fh, stderr=stderr_fh, stdin=subprocess.DEVNULL,
+        # See launcher.spawn_agy's start_new_session comment: isolates this
+        # child into its own process group so kill_process_tree's killpg
+        # can't reach CADET's own server (or the host Claude Code process).
+        start_new_session=True,
     )
 
 

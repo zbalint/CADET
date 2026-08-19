@@ -120,6 +120,12 @@ async def spawn_agy(
     argv = build_argv(image, prompt_text, cwd, timeout_s, job_id, model, effort, skip_permissions, sandbox)
     return await asyncio.create_subprocess_exec(
         *argv, stdout=stdout_fh, stderr=stderr_fh, stdin=subprocess.DEVNULL,
+        # New session/process group (POSIX; ignored on Windows) so
+        # treekill.kill_process_tree's os.killpg() targets only this job's
+        # own tree -- without this the child inherits CADET server's (and
+        # therefore the host Claude Code process's) process group, and a
+        # cancel/timeout kill fans SIGTERM out to all of them.
+        start_new_session=True,
     )
 
 
