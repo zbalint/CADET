@@ -29,7 +29,9 @@ you make in your final summary.
 - Context ID: `task_refactor_auth_01`
 - Agent ID: antigravity
 - Job label: auth-refactor-step1
-- Working directory: C:\\repos\\myapp
+- Working directory: C:\\repos\\myapp  (host-side path, shown for log-reading only — do NOT build
+  file paths from this string. Your shell's actual working directory is already correct; use
+  `pwd` or relative paths for any file you read or write.)
 - CADET job id: job-a1b2c3d4e5f6  (informational only — you have no CADET or SALTMDB/MCP tools in
   this environment; do not attempt to call any, including search_memory/log_event/store_memory.
   Just write your complete answer as your final plain-text response.)

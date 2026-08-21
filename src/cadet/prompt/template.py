@@ -8,7 +8,9 @@ you make in your final summary.
 - Context ID: `{context_id}`
 - Agent ID: {agent_id}
 - Job label: {label}
-- Working directory: {cwd}
+- Working directory: {cwd}  (host-side path, shown for log-reading only — do NOT build file paths
+  from this string. Your shell's actual working directory is already correct; use `pwd` or
+  relative paths for any file you read or write.)
 - CADET job id: {job_id}  (informational only — you have no CADET or SALTMDB/MCP tools in this
   environment; do not attempt to call any, including search_memory/log_event/store_memory. Just
   write your complete answer as your final plain-text response.)
@@ -40,6 +42,16 @@ def render_prompt(context_id: str, label, cwd: str, job_id: str, prompt: str,
     instruction telling it to ignore the requirement). `context_id`/`agent_id` are kept in the
     rendered prompt as informational job metadata only (useful for a human reading logs), not as an
     instruction to call anything.
+
+    `cwd` is the caller's HOST-side directory, but containerized providers only ever see it bind-
+    mounted at the fixed in-container path `/workspace` (never at the literal host path) — a worker
+    that trusts the rendered `Working directory: {cwd}` line and constructs file paths from that
+    literal string ends up writing outside the real bind mount, into the container's own ephemeral
+    layer, which is discarded on exit. This produces a fully self-consistent but entirely fake
+    success: the worker's own read-back of what it just wrote matches, so nothing in the job's
+    transcript signals a problem (confirmed live 2026-08-21 against the codex provider — see
+    SALTMDB memory 3559d26c). The line is kept only as a host-log-reading aid and is now explicitly
+    marked as such, directing the worker to `pwd`/relative paths for anything it actually opens.
     """
     rendered = PROMPT_TEMPLATE
     rendered = rendered.replace("{agent_display_name}", display_name)
