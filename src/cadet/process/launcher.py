@@ -10,14 +10,14 @@ def docker_user_flags() -> list[str]:
     HOST_UID/HOST_GID so entrypoint.sh can chown its auth volume and drop
     from root to that UID/GID (via setpriv) before exec'ing the real CLI --
     fixes --cap-drop=ALL leaving root unable to write bind-mounted
-    /workspace files owned by the host user (CAP_DAC_OVERRIDE is stripped).
-    --cap-add=CHOWN/SETUID/SETGID re-grants just enough capability for that
-    one entrypoint-time chown-then-drop (chown of the auth volume needs
-    CAP_CHOWN too -- confirmed empirically, "Operation not permitted"
-    without it even with SETUID/SETGID present); the kernel clears the
-    process's capability sets automatically once it crosses uid 0 ->
-    non-zero (no keepcaps), so the CLI itself never actually runs with
-    elevated caps -- net security posture is unchanged from plain
+    /workspace files owned by the host user. --cap-add=CHOWN/SETUID/SETGID/
+    DAC_OVERRIDE re-grants just enough capability for that one
+    entrypoint-time chown-then-drop: CAP_CHOWN changes auth-volume ownership,
+    CAP_DAC_OVERRIDE traverses job-created restrictive directories already in
+    that volume, and CAP_SETUID/CAP_SETGID drop to the host identity. The
+    kernel clears the process's capability sets automatically once it crosses
+    uid 0 -> non-zero (no keepcaps), so the CLI itself never actually runs
+    with elevated caps -- net security posture is unchanged from plain
     --cap-drop=ALL.
 
     os.getuid is absent on Windows, which is the correct signal to skip
@@ -28,7 +28,8 @@ def docker_user_flags() -> list[str]:
     if not hasattr(os, "getuid"):
         return []
     return [
-        "--cap-add=CHOWN", "--cap-add=SETUID", "--cap-add=SETGID",
+        "--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE", "--cap-add=SETUID",
+        "--cap-add=SETGID",
         "-e", f"HOST_UID={os.getuid()}", "-e", f"HOST_GID={os.getgid()}",
     ]
 

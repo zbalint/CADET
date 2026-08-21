@@ -9,7 +9,8 @@ class TestDockerUserFlags(unittest.TestCase):
     inside a containerized provider can't write bind-mounted files owned by
     the host user (CAP_DAC_OVERRIDE stripped). entrypoint.sh reads
     HOST_UID/HOST_GID and drops from root to that UID/GID via setpriv,
-    which itself needs CAP_CHOWN (to chown the auth volume) and
+    which needs CAP_CHOWN (to chown the auth volume), CAP_DAC_OVERRIDE (to
+    traverse job-created restrictive paths already in that volume), and
     CAP_SETUID/CAP_SETGID (to actually change UID/GID) re-added on top of
     --cap-drop=ALL."""
 
@@ -19,7 +20,8 @@ class TestDockerUserFlags(unittest.TestCase):
             flags = docker_user_flags()
         self.assertEqual(
             flags,
-            ["--cap-add=CHOWN", "--cap-add=SETUID", "--cap-add=SETGID",
+            ["--cap-add=CHOWN", "--cap-add=DAC_OVERRIDE", "--cap-add=SETUID",
+             "--cap-add=SETGID",
              "-e", "HOST_UID=1000", "-e", "HOST_GID=1000"],
         )
 
